@@ -15,7 +15,19 @@ pub struct ClaudeBackend;
 impl ClaudeBackend {
     const NAME: &'static str = "claude";
 
+    /// Resolve the Claude Code `projects/` directory.
+    ///
+    /// Precedence:
+    /// 1. `CCR_CLAUDE_DIR` — full path to the `projects/` dir (escape hatch)
+    /// 2. `CLAUDE_CONFIG_DIR` — Claude Code's own override; we append `projects`
+    /// 3. `~/.claude/projects` — default
     fn projects_dir() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("CCR_CLAUDE_DIR") {
+            return Ok(PathBuf::from(dir));
+        }
+        if let Ok(config) = std::env::var("CLAUDE_CONFIG_DIR") {
+            return Ok(PathBuf::from(config).join("projects"));
+        }
         let home = dirs::home_dir().context("no home dir")?;
         Ok(home.join(".claude").join("projects"))
     }
