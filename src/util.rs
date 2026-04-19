@@ -64,3 +64,86 @@ pub fn pgrep_f(pattern: &str) -> Vec<String> {
         .map(String::from)
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use std::path::PathBuf;
+
+    #[test]
+    fn truncate_under_max_is_passthrough() {
+        assert_eq!(truncate("hi", 10), "hi");
+    }
+
+    #[test]
+    fn truncate_exact_max_is_passthrough() {
+        assert_eq!(truncate("abcde", 5), "abcde");
+    }
+
+    #[test]
+    fn truncate_over_max_adds_ellipsis() {
+        assert_eq!(truncate("abcdef", 3), "abc…");
+    }
+
+    #[test]
+    fn truncate_normalizes_newlines_and_carriage_returns() {
+        assert_eq!(truncate("a\nb\rc", 10), "a b c");
+    }
+
+    #[test]
+    fn truncate_counts_unicode_by_char_not_byte() {
+        assert_eq!(truncate("한국어입니다", 3), "한국어…");
+    }
+
+    #[test]
+    fn relative_time_seconds() {
+        let dt = Local::now() - Duration::seconds(10);
+        assert!(relative_time(dt).ends_with("s ago"));
+    }
+
+    #[test]
+    fn relative_time_minutes() {
+        let dt = Local::now() - Duration::minutes(30);
+        assert_eq!(relative_time(dt), "30m ago");
+    }
+
+    #[test]
+    fn relative_time_hours() {
+        let dt = Local::now() - Duration::hours(5);
+        assert_eq!(relative_time(dt), "5h ago");
+    }
+
+    #[test]
+    fn relative_time_days() {
+        let dt = Local::now() - Duration::days(3);
+        assert_eq!(relative_time(dt), "3d ago");
+    }
+
+    #[test]
+    fn relative_time_beyond_a_month_renders_date() {
+        let dt = Local::now() - Duration::days(60);
+        let s = relative_time(dt);
+        assert!(s.len() == 10 && s.chars().nth(4) == Some('-'));
+    }
+
+    #[test]
+    fn project_basename_returns_last_segment() {
+        assert_eq!(project_basename(&PathBuf::from("/a/b/proj")), "proj");
+    }
+
+    #[test]
+    fn is_possibly_live_true_for_recent() {
+        assert!(is_possibly_live(Local::now() - Duration::seconds(60)));
+    }
+
+    #[test]
+    fn is_possibly_live_false_for_old() {
+        assert!(!is_possibly_live(Local::now() - Duration::hours(1)));
+    }
+
+    #[test]
+    fn pgrep_f_returns_empty_for_improbable_pattern() {
+        assert!(pgrep_f("!!!definitely-not-a-real-process-pattern-xyz!!!").is_empty());
+    }
+}

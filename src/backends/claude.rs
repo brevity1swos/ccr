@@ -97,10 +97,11 @@ pub(crate) fn parse_session(path: &Path) -> Result<Option<Session>> {
     if id.is_empty() {
         return Ok(None);
     }
-
     let file = fs::File::open(path)?;
-    let reader = BufReader::new(file);
+    parse_session_from_reader(&id, BufReader::new(file))
+}
 
+pub(crate) fn parse_session_from_reader(id: &str, reader: impl BufRead) -> Result<Option<Session>> {
     let mut cwd: Option<PathBuf> = None;
     let mut title: Option<String> = None;
     let mut last_ts: Option<DateTime<Local>> = None;
@@ -159,7 +160,7 @@ pub(crate) fn parse_session(path: &Path) -> Result<Option<Session>> {
 
     Ok(Some(Session {
         backend: ClaudeBackend::NAME,
-        id,
+        id: id.to_string(),
         cwd,
         title,
         last_activity,
@@ -167,4 +168,88 @@ pub(crate) fn parse_session(path: &Path) -> Result<Option<Session>> {
         preview,
         possibly_live,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn parse(jsonl: &str) -> Session {
+        parse_session_from_reader("abc-123", Cursor::new(jsonl))
+            .expect("parse ok")
+            .expect("non-empty session")
+    }
+
+    #[test]
+    fn first_user_message_becomes_title() {
+        let jsonl = r#"{"type":"user","cwd":"/home/me/proj","timestamp":"2026-04-19T10:00:00Z","message":{"content":"hello world"}}
+{"type":"assistant","timestamp":"2026-04-19T10:00:01Z","message":{"content":"hi back"}}
+"#;
+        let s = parse(jsonl);
+        assert_eq!(s.id, "abc-123");
+        assert_eq!(s.backend, "claude");
+        assert_eq!(s.cwd, PathBuf::from("/home/me/proj"));
+        assert_eq!(s.title, "hello world");
+        assert_eq!(s.message_count, 2);
+        assert_eq!(s.preview.len(), 2);
+    }
+
+    #[test]
+    fn empty_content_is_skipped_for_title() {
+        let jsonl = r#"{"type":"user","cwd":"/x","timestamp":"2026-04-19T10:00:00Z","message":{"content":""}}
+{"type":"user","cwd":"/x","timestamp":"2026-04-19T10:00:01Z","message":{"content":"real"}}
+"#;
+        let s = parse(jsonl);
+        assert_eq!(s.title, "real");
+        assert_eq!(s.message_count, 1);
+    }
+
+    #[test]
+    fn array_content_extracts_text_parts() {
+        let jsonl = r#"{"type":"user","cwd":"/x","timestamp":"2026-04-19T10:00:00Z","message":{"content":[{"type":"text","text":"hi there"},{"type":"image","source":"..."}]}}
+"#;
+        let s = parse(jsonl);
+        assert_eq!(s.title, "hi there");
+    }
+
+    #[test]
+    fn no_user_messages_gives_placeholder_title() {
+        let jsonl = r#"{"type":"permission-mode","sessionId":"x"}
+{"type":"file-history-snapshot"}
+"#;
+        let s = parse(jsonl);
+        assert_eq!(s.title, "(no user message)");
+        assert_eq!(s.message_count, 0);
+    }
+
+    #[test]
+    fn malformed_lines_do_not_abort_parse() {
+        let jsonl = "not json\n\n{\"type\":\"user\",\"cwd\":\"/x\",\"timestamp\":\"2026-04-19T10:00:00Z\",\"message\":{\"content\":\"ok\"}}\n";
+        let s = parse(jsonl);
+        assert_eq!(s.title, "ok");
+        assert_eq!(s.message_count, 1);
+    }
+
+    #[test]
+    fn long_title_is_truncated() {
+        let long = "x".repeat(200);
+        let jsonl = format!(
+            r#"{{"type":"user","cwd":"/x","timestamp":"2026-04-19T10:00:00Z","message":{{"content":"{long}"}}}}
+"#
+        );
+        let s = parse(&jsonl);
+        assert!(s.title.chars().count() <= TITLE_MAX + 1); // +1 for the ellipsis
+        assert!(s.title.ends_with('…'));
+    }
+
+    #[test]
+    fn cwd_comes_from_first_record_that_has_it() {
+        let jsonl = r#"{"type":"permission-mode","sessionId":"x"}
+{"type":"user","cwd":"/first","timestamp":"2026-04-19T10:00:00Z","message":{"content":"hi"}}
+{"type":"user","cwd":"/second","timestamp":"2026-04-19T10:00:01Z","message":{"content":"hey"}}
+"#;
+        let s = parse(jsonl);
+        assert_eq!(s.cwd, PathBuf::from("/first"));
+    }
 }
