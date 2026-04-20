@@ -113,6 +113,36 @@ impl Backend for GeminiBackend {
         // so pgrep-by-id gives no signal — skip live-detection.
         Vec::new()
     }
+
+    fn all_turns(&self, s: &Session) -> Result<Vec<Turn>> {
+        let content = fs::read_to_string(&s.origin)
+            .with_context(|| format!("read {}", s.origin.display()))?;
+        let Ok(v) = serde_json::from_str::<Value>(&content) else {
+            return Ok(Vec::new());
+        };
+        let messages = v
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut turns = Vec::new();
+        for msg in &messages {
+            let Some(role) = msg
+                .get("type")
+                .and_then(|t| t.as_str())
+                .and_then(Role::parse)
+            else {
+                continue;
+            };
+            let content = msg.get("content").unwrap_or(&Value::Null);
+            let text = extract_gemini_text(content);
+            if text.trim().is_empty() {
+                continue;
+            }
+            turns.push(Turn { role, text });
+        }
+        Ok(turns)
+    }
 }
 
 fn parse_session(path: &Path, cwd: PathBuf) -> Result<Option<Session>> {

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::process::Command;
 
-use crate::session::Session;
+use crate::session::{Session, Turn};
 use crate::util::pgrep_f;
 
 pub mod claude;
@@ -39,6 +39,11 @@ pub trait Backend: Send + Sync {
         crate::trash::move_to_trash(&s.origin, self.name(), &s.id)?;
         Ok(())
     }
+
+    /// All user + assistant turns from the session, in chronological order.
+    /// Re-reads the origin file (not capped like `Session.preview`). Used by
+    /// `ccr export` to produce complete markdown / JSON dumps.
+    fn all_turns(&self, s: &Session) -> Result<Vec<Turn>>;
 }
 
 pub fn all() -> Vec<Box<dyn Backend>> {

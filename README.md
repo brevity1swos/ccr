@@ -111,6 +111,7 @@ tool's resume command with the session's original `cwd`.
 | `ccr list`                 | plain-text dump of all sessions (tool id date title)   |
 | `ccr path <id>`            | absolute path to session file (pipes well)             |
 | `ccr show <id>`            | raw file contents (same as `cat $(ccr path <id>)`)     |
+| `ccr export <id>`          | full-turn markdown dump (or `--format json`)           |
 
 Soft-deletes go to `~/.ccr/trash/<tool>/<id>.jsonl` with a sidecar
 `<id>.meta.json` recording the original path. `ccr restore` reads the

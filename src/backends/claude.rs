@@ -78,6 +78,34 @@ impl Backend for ClaudeBackend {
         cmd.arg("--resume").arg(&s.id).current_dir(&s.cwd);
         cmd
     }
+
+    fn all_turns(&self, s: &Session) -> Result<Vec<Turn>> {
+        let file =
+            fs::File::open(&s.origin).with_context(|| format!("open {}", s.origin.display()))?;
+        let reader = BufReader::new(file);
+        let mut turns = Vec::new();
+        for line in reader.lines() {
+            let Ok(line) = line else { continue };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let Some(role) = v.get("type").and_then(|t| t.as_str()).and_then(Role::parse) else {
+                continue;
+            };
+            let Some(content) = v.get("message").and_then(|m| m.get("content")) else {
+                continue;
+            };
+            let text = extract_text(content);
+            if text.trim().is_empty() {
+                continue;
+            }
+            turns.push(Turn { role, text });
+        }
+        Ok(turns)
+    }
 }
 
 fn extract_text(content: &Value) -> String {

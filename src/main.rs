@@ -10,9 +10,15 @@ mod tui;
 mod util;
 
 use backends::{Backend, all, by_name, scan_all};
-use session::Session;
+use session::{Role, Session, Turn};
 use tui::{AppAction, run};
 use util::truncate;
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum ExportFormat {
+    Md,
+    Json,
+}
 
 #[derive(Parser)]
 #[command(name = "ccr", version, about = "CLI Code Resume — TUI session picker")]
@@ -50,6 +56,14 @@ enum Command {
         /// Session id.
         id: String,
     },
+    /// Export a session as markdown (default) or JSON — full turns, not just preview.
+    Export {
+        /// Session id.
+        id: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = ExportFormat::Md)]
+        format: ExportFormat,
+    },
 }
 
 fn main() -> Result<()> {
@@ -66,6 +80,7 @@ fn main() -> Result<()> {
         Some(Command::Restore { id }) => run_restore(id.as_deref()),
         Some(Command::Path { id }) => run_path(&id),
         Some(Command::Show { id }) => run_show(&id),
+        Some(Command::Export { id, format }) => run_export(&id, format),
     }
 }
 
@@ -89,6 +104,128 @@ fn run_show(id: &str) -> Result<()> {
         .with_context(|| format!("read {}", s.origin.display()))?;
     print!("{content}");
     Ok(())
+}
+
+fn run_export(id: &str, format: ExportFormat) -> Result<()> {
+    let backends = all();
+    let session = scan_all(&backends)
+        .into_iter()
+        .find(|s| s.id == id)
+        .with_context(|| format!("no session with id `{id}`"))?;
+    let backend = by_name(&backends, session.backend)
+        .with_context(|| format!("unknown backend `{}`", session.backend))?;
+    let turns = backend.all_turns(&session)?;
+    match format {
+        ExportFormat::Md => print!("{}", format_md(&session, &turns)),
+        ExportFormat::Json => println!("{}", format_json(&session, &turns)?),
+    }
+    Ok(())
+}
+
+pub(crate) fn format_md(s: &Session, turns: &[Turn]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# Session `{}`\n\n", s.id));
+    out.push_str(&format!("- **Tool:** {}\n", s.backend));
+    out.push_str(&format!(
+        "- **Last active:** {}\n",
+        s.last_activity.format("%Y-%m-%d %H:%M")
+    ));
+    out.push_str(&format!("- **cwd:** `{}`\n", s.cwd.display()));
+    out.push_str(&format!("- **Turns:** {}\n\n", turns.len()));
+    out.push_str("---\n\n");
+    for t in turns {
+        let tag = match t.role {
+            Role::User => "## ❯ user",
+            Role::Assistant => "## ◆ assistant",
+        };
+        out.push_str(tag);
+        out.push_str("\n\n");
+        out.push_str(t.text.trim());
+        out.push_str("\n\n");
+    }
+    out
+}
+
+pub(crate) fn format_json(s: &Session, turns: &[Turn]) -> Result<String> {
+    let turns_json: Vec<serde_json::Value> = turns
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "role": match t.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                },
+                "text": &t.text,
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "id": s.id,
+        "backend": s.backend,
+        "cwd": s.cwd.to_string_lossy(),
+        "last_activity": s.last_activity.to_rfc3339(),
+        "message_count": s.message_count,
+        "turns": turns_json,
+    });
+    Ok(serde_json::to_string_pretty(&doc)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Local;
+    use std::path::PathBuf;
+
+    fn sample_session() -> Session {
+        Session {
+            backend: "claude",
+            id: "abc-123".into(),
+            cwd: PathBuf::from("/proj"),
+            title: "hi".into(),
+            last_activity: Local::now(),
+            message_count: 2,
+            preview: Vec::new(),
+            possibly_live: false,
+            origin: PathBuf::from("<t>"),
+            searchable: String::new(),
+        }
+    }
+
+    fn sample_turns() -> Vec<Turn> {
+        vec![
+            Turn {
+                role: Role::User,
+                text: "hello".into(),
+            },
+            Turn {
+                role: Role::Assistant,
+                text: "hi back".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn format_md_has_header_and_turns() {
+        let md = format_md(&sample_session(), &sample_turns());
+        assert!(md.starts_with("# Session `abc-123`"));
+        assert!(md.contains("- **Tool:** claude"));
+        assert!(md.contains("## ❯ user"));
+        assert!(md.contains("hello"));
+        assert!(md.contains("## ◆ assistant"));
+        assert!(md.contains("hi back"));
+    }
+
+    #[test]
+    fn format_json_round_trips() {
+        let s = sample_session();
+        let turns = sample_turns();
+        let json = format_json(&s, &turns).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["id"], "abc-123");
+        assert_eq!(v["backend"], "claude");
+        assert_eq!(v["turns"][0]["role"], "user");
+        assert_eq!(v["turns"][1]["role"], "assistant");
+    }
 }
 
 fn launch_picker() -> Result<()> {
