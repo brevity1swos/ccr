@@ -267,15 +267,10 @@ fn matches_filter(s: &Session, filter: &str) -> bool {
         return true;
     }
     let needle = filter.to_lowercase();
-    if s.title.to_lowercase().contains(&needle)
+    s.title.to_lowercase().contains(&needle)
         || s.cwd.to_string_lossy().to_lowercase().contains(&needle)
         || s.backend.to_lowercase().contains(&needle)
-    {
-        return true;
-    }
-    s.preview
-        .iter()
-        .any(|t| t.text.to_lowercase().contains(&needle))
+        || s.searchable.contains(&needle)
 }
 
 fn move_sel(state: &mut ListState, visible: &[&Session], delta: i32) {
@@ -792,6 +787,7 @@ mod tests {
             preview: Vec::new(),
             possibly_live: false,
             origin: PathBuf::from("<test>"),
+            searchable: String::new(),
         }
     }
 
@@ -831,14 +827,12 @@ mod tests {
     }
 
     #[test]
-    fn filter_matches_content_in_preview_turns() {
+    fn filter_matches_full_turn_content() {
         let mut s = sess("unrelated title", "/x", "claude");
-        s.preview.push(crate::session::Turn {
-            role: Role::Assistant,
-            text: "The panic came from a race on CCR_TRASH_DIR".into(),
-        });
+        // searchable is stored pre-lowercased (see session::append_searchable).
+        s.searchable = "the panic came from a race on ccr_trash_dir".into();
         assert!(matches_filter(&s, "race"));
-        assert!(matches_filter(&s, "CCR_TRASH_DIR"));
+        assert!(matches_filter(&s, "CCR_TRASH_DIR")); // needle is lowered
         assert!(!matches_filter(&s, "nonexistentword"));
     }
 

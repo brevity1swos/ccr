@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::backends::Backend;
-use crate::session::{PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn};
+use crate::session::{PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn, append_searchable};
 use crate::util::{is_possibly_live, truncate};
 
 pub struct ClaudeBackend;
@@ -105,6 +105,7 @@ pub(crate) fn parse_session_from_reader(
     let mut last_ts: Option<DateTime<Local>> = None;
     let mut message_count = 0usize;
     let mut turns: VecDeque<Turn> = VecDeque::with_capacity(PREVIEW_TURNS);
+    let mut searchable = String::new();
 
     for line in reader.lines() {
         let Ok(line) = line else { continue };
@@ -141,6 +142,7 @@ pub(crate) fn parse_session_from_reader(
         if role == Role::User && title.is_none() {
             title = Some(truncate(&text, TITLE_MAX));
         }
+        append_searchable(&mut searchable, &text);
         if turns.len() == PREVIEW_TURNS {
             turns.pop_front();
         }
@@ -161,6 +163,7 @@ pub(crate) fn parse_session_from_reader(
         preview: turns.into_iter().collect(),
         possibly_live: is_possibly_live(last_activity),
         origin,
+        searchable,
     })
 }
 
