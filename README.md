@@ -81,7 +81,7 @@ ccr
 | `g` / `Home`| jump to top                             |
 | `G` / `End` | jump to bottom                          |
 | `PgUp/Dn`   | page up/down (10 rows)                  |
-| `/`         | filter by title, cwd, or tool           |
+| `/`         | filter: title, cwd, tool, or preview content |
 | `Enter`     | resume selected session (live-checked)  |
 | `?` / `F1`  | help overlay                            |
 | `q` / `Esc` | quit                                    |

@@ -259,9 +259,15 @@ fn matches_filter(s: &Session, filter: &str) -> bool {
         return true;
     }
     let needle = filter.to_lowercase();
-    s.title.to_lowercase().contains(&needle)
+    if s.title.to_lowercase().contains(&needle)
         || s.cwd.to_string_lossy().to_lowercase().contains(&needle)
         || s.backend.to_lowercase().contains(&needle)
+    {
+        return true;
+    }
+    s.preview
+        .iter()
+        .any(|t| t.text.to_lowercase().contains(&needle))
 }
 
 fn move_sel(state: &mut ListState, visible: &[&Session], delta: i32) {
@@ -735,7 +741,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         k("Enter", "resume selected session (with live-check)"),
         k("d", "delete selected (soft — moves to ~/.ccr/trash/)"),
         k("D", "prune by age (7d/30d/90d/1y/custom)"),
-        k("/", "filter by title, cwd, or tool"),
+        k("/", "filter: title, cwd, tool, or preview content"),
         k("? / F1", "this help"),
         k("q / Esc", "quit"),
         Line::from(""),
@@ -813,6 +819,18 @@ mod tests {
     #[test]
     fn filter_rejects_no_match() {
         assert!(!matches_filter(&sess("hello", "/y", "claude"), "xyz"));
+    }
+
+    #[test]
+    fn filter_matches_content_in_preview_turns() {
+        let mut s = sess("unrelated title", "/x", "claude");
+        s.preview.push(crate::session::Turn {
+            role: Role::Assistant,
+            text: "The panic came from a race on CCR_TRASH_DIR".into(),
+        });
+        assert!(matches_filter(&s, "race"));
+        assert!(matches_filter(&s, "CCR_TRASH_DIR"));
+        assert!(!matches_filter(&s, "nonexistentword"));
     }
 
     #[test]
