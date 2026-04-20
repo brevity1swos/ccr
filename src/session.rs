@@ -12,10 +12,14 @@ pub enum Role {
 }
 
 impl Role {
+    /// Recognizes role strings across supported tools:
+    /// Claude = `user|assistant`, Codex = `user|assistant`,
+    /// Gemini = `user|gemini`. Unknown roles (e.g. `developer`,
+    /// `info`, `tool`) are filtered out.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "user" => Some(Self::User),
-            "assistant" => Some(Self::Assistant),
+            "assistant" | "gemini" | "model" => Some(Self::Assistant),
             _ => None,
         }
     }

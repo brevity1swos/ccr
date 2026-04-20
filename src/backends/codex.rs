@@ -1,0 +1,228 @@
+use anyhow::{Context, Result};
+use chrono::{DateTime, Local, TimeZone};
+use serde_json::Value;
+use std::collections::VecDeque;
+use std::fs;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::backends::Backend;
+use crate::session::{PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn};
+use crate::util::{is_possibly_live, truncate};
+
+pub struct CodexBackend;
+
+impl CodexBackend {
+    const NAME: &'static str = "codex";
+
+    /// Resolve the Codex `sessions/` directory.
+    ///
+    /// Precedence:
+    /// 1. `CCR_CODEX_DIR` — full path to the `sessions/` dir
+    /// 2. `~/.codex/sessions` — default
+    fn sessions_dir() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("CCR_CODEX_DIR") {
+            return Ok(PathBuf::from(dir));
+        }
+        let home = dirs::home_dir().context("no home dir")?;
+        Ok(home.join(".codex").join("sessions"))
+    }
+}
+
+impl Backend for CodexBackend {
+    fn name(&self) -> &'static str {
+        Self::NAME
+    }
+
+    fn scan(&self) -> Result<Vec<Session>> {
+        let root = Self::sessions_dir()?;
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut files = Vec::new();
+        walk_jsonl(&root, &mut files)?;
+        let mut out = Vec::with_capacity(files.len());
+        for p in files {
+            if let Ok(Some(s)) = parse_session(&p) {
+                out.push(s);
+            }
+        }
+        Ok(out)
+    }
+
+    fn resume(&self, s: &Session) -> Command {
+        let mut cmd = Command::new("codex");
+        cmd.arg("resume").arg(&s.id).current_dir(&s.cwd);
+        cmd
+    }
+}
+
+fn walk_jsonl(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let p = entry.path();
+        if entry.file_type()?.is_dir() {
+            walk_jsonl(&p, out)?;
+        } else if p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            out.push(p);
+        }
+    }
+    Ok(())
+}
+
+fn parse_session(path: &Path) -> Result<Option<Session>> {
+    let file = fs::File::open(path)?;
+    parse_session_from_reader(BufReader::new(file), path.to_path_buf())
+}
+
+pub(crate) fn parse_session_from_reader(
+    reader: impl BufRead,
+    origin: PathBuf,
+) -> Result<Option<Session>> {
+    let mut id: Option<String> = None;
+    let mut cwd: Option<PathBuf> = None;
+    let mut last_ts: Option<DateTime<Local>> = None;
+    let mut title: Option<String> = None;
+    let mut message_count = 0usize;
+    let mut turns: VecDeque<Turn> = VecDeque::with_capacity(PREVIEW_TURNS);
+
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+
+        if let Some(ts) = v.get("timestamp").and_then(|t| t.as_str())
+            && let Ok(parsed) = DateTime::parse_from_rfc3339(ts)
+        {
+            last_ts = Some(parsed.with_timezone(&Local));
+        }
+
+        let record_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let payload = v.get("payload").unwrap_or(&Value::Null);
+
+        match record_type {
+            "session_meta" => {
+                if let Some(session_id) = payload.get("id").and_then(|i| i.as_str()) {
+                    id = Some(session_id.to_string());
+                }
+                if let Some(c) = payload.get("cwd").and_then(|c| c.as_str()) {
+                    cwd = Some(PathBuf::from(c));
+                }
+            }
+            "response_item" => {
+                if payload.get("type").and_then(|t| t.as_str()) != Some("message") {
+                    continue;
+                }
+                let role_str = payload.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                let Some(role) = Role::parse(role_str) else {
+                    continue;
+                };
+                let content = payload.get("content").unwrap_or(&Value::Null);
+                let text = extract_codex_text(content);
+                if text.trim().is_empty() || is_system_prefix(&text) {
+                    continue;
+                }
+                message_count += 1;
+                if role == Role::User && title.is_none() {
+                    title = Some(truncate(&text, TITLE_MAX));
+                }
+                if turns.len() == PREVIEW_TURNS {
+                    turns.pop_front();
+                }
+                turns.push_back(Turn { role, text });
+            }
+            _ => {}
+        }
+    }
+
+    let Some(id) = id else { return Ok(None) };
+    let cwd = cwd.unwrap_or_else(|| PathBuf::from("(unknown)"));
+    let title = title.unwrap_or_else(|| "(no user message)".into());
+    let last_activity = last_ts.unwrap_or_else(|| Local.timestamp_opt(0, 0).unwrap());
+
+    Ok(Some(Session {
+        backend: CodexBackend::NAME,
+        id,
+        cwd,
+        title,
+        last_activity,
+        message_count,
+        preview: turns.into_iter().collect(),
+        possibly_live: is_possibly_live(last_activity),
+        origin,
+    }))
+}
+
+fn extract_codex_text(content: &Value) -> String {
+    let Value::Array(arr) = content else {
+        return String::new();
+    };
+    arr.iter()
+        .filter_map(|c| match c.get("type").and_then(|t| t.as_str()) {
+            Some("input_text") | Some("output_text") | Some("text") => {
+                c.get("text").and_then(|t| t.as_str()).map(String::from)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_system_prefix(text: &str) -> bool {
+    text.starts_with("<environment_context>") || text.starts_with("<permissions instructions>")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn parse(jsonl: &str) -> Option<Session> {
+        parse_session_from_reader(Cursor::new(jsonl), PathBuf::from("<test>")).unwrap()
+    }
+
+    #[test]
+    fn extracts_session_id_and_cwd_from_meta() {
+        let jsonl = r#"{"type":"session_meta","timestamp":"2026-04-01T19:28:35.898Z","payload":{"id":"abc-123","cwd":"/my/proj","timestamp":"2026-04-01T19:28:35.898Z"}}
+{"type":"response_item","timestamp":"2026-04-01T19:28:40Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}
+"#;
+        let s = parse(jsonl).expect("session");
+        assert_eq!(s.id, "abc-123");
+        assert_eq!(s.cwd, PathBuf::from("/my/proj"));
+        assert_eq!(s.title, "hello");
+        assert_eq!(s.backend, "codex");
+    }
+
+    #[test]
+    fn skips_environment_and_permissions_blocks() {
+        let jsonl = r#"{"type":"session_meta","timestamp":"2026-04-01T19:28:35.898Z","payload":{"id":"abc","cwd":"/x"}}
+{"type":"response_item","timestamp":"2026-04-01T19:28:40Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>cwd=/x</environment_context>"}]}}
+{"type":"response_item","timestamp":"2026-04-01T19:28:41Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"real question"}]}}
+"#;
+        let s = parse(jsonl).expect("session");
+        assert_eq!(s.title, "real question");
+    }
+
+    #[test]
+    fn no_meta_means_no_session() {
+        let jsonl = r#"{"type":"response_item","timestamp":"2026-04-01T19:28:40Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}
+"#;
+        assert!(parse(jsonl).is_none());
+    }
+
+    #[test]
+    fn developer_role_is_skipped() {
+        let jsonl = r#"{"type":"session_meta","timestamp":"2026-04-01T19:28:35.898Z","payload":{"id":"abc","cwd":"/x"}}
+{"type":"response_item","timestamp":"2026-04-01T19:28:40Z","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"system prompt"}]}}
+{"type":"response_item","timestamp":"2026-04-01T19:28:41Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"actual"}]}}
+"#;
+        let s = parse(jsonl).expect("session");
+        assert_eq!(s.title, "actual");
+        assert_eq!(s.message_count, 1);
+    }
+}

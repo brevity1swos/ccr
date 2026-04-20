@@ -5,6 +5,8 @@ use crate::session::Session;
 use crate::util::pgrep_f;
 
 pub mod claude;
+pub mod codex;
+pub mod gemini;
 
 /// One supported CLI coding assistant. Implementations know how to list the
 /// tool's disk-backed sessions and how to resume one of them.
@@ -40,7 +42,11 @@ pub trait Backend: Send + Sync {
 }
 
 pub fn all() -> Vec<Box<dyn Backend>> {
-    vec![Box::new(claude::ClaudeBackend)]
+    vec![
+        Box::new(claude::ClaudeBackend),
+        Box::new(codex::CodexBackend),
+        Box::new(gemini::GeminiBackend),
+    ]
 }
 
 pub fn scan_all(backends: &[Box<dyn Backend>]) -> Vec<Session> {
