@@ -125,28 +125,39 @@ Each backend knows where its tool stores sessions and how to resume one.
 
 For each session `ccr` extracts:
 
-- `cwd` — first record with a `cwd` field
+- `cwd` — working directory the session was started in
 - title — first user message, truncated to 80 chars
-- `last_activity` — most recent `timestamp`
-- `message_count` — count of user + assistant records
+- `last_activity` — most recent turn timestamp (drives the sort and the `● live` flag)
+- `message_count` — user + assistant turns only
 - `preview` — last 6 turns, rendered in the right pane
 
-Purely read-only. Never modifies session files.
+Read-only at rest; the only writes `ccr` ever performs are moving your own
+session files into `~/.ccr/trash/` when you press `d` or `D`.
 
 ## Adding a backend
 
 A backend is any type that implements:
 
 ```rust
-trait Backend {
+pub trait Backend: Send + Sync {
     fn name(&self) -> &'static str;
     fn scan(&self) -> Result<Vec<Session>>;
     fn resume(&self, s: &Session) -> std::process::Command;
+
+    // Optional overrides with useful defaults:
+    fn running(&self, s: &Session) -> Vec<String>;   // default: pgrep -f <id>
+    fn trash(&self, s: &Session) -> Result<()>;      // default: move session.origin
 }
 ```
 
 Register it in `backends::all()` and sessions surface in the shared TUI with a
-tool tag in the left column.
+`[tool]` tag in the left column.
+
+## Links
+
+- [crates.io/crates/ccr](https://crates.io/crates/ccr)
+- [docs.rs/ccr](https://docs.rs/ccr)
+- [Changelog](./CHANGELOG.md)
 
 ## License
 
