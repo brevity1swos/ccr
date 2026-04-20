@@ -39,6 +39,17 @@ enum Command {
         /// Session id to restore. Omit for interactive numeric prompt.
         id: Option<String>,
     },
+    /// Print the absolute path to a session's on-disk file.
+    /// Useful in shell pipelines: `cat $(ccr path <id>)`.
+    Path {
+        /// Session id.
+        id: String,
+    },
+    /// Print a session's raw file contents (equivalent to `cat $(ccr path …)`).
+    Show {
+        /// Session id.
+        id: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -53,7 +64,31 @@ fn main() -> Result<()> {
         }) => run_prune(&older_than, dry_run),
         Some(Command::List) => run_list(),
         Some(Command::Restore { id }) => run_restore(id.as_deref()),
+        Some(Command::Path { id }) => run_path(&id),
+        Some(Command::Show { id }) => run_show(&id),
     }
+}
+
+fn find_session_by_id(id: &str) -> Result<Session> {
+    let backends = all();
+    scan_all(&backends)
+        .into_iter()
+        .find(|s| s.id == id)
+        .with_context(|| format!("no session with id `{id}`"))
+}
+
+fn run_path(id: &str) -> Result<()> {
+    let s = find_session_by_id(id)?;
+    println!("{}", s.origin.display());
+    Ok(())
+}
+
+fn run_show(id: &str) -> Result<()> {
+    let s = find_session_by_id(id)?;
+    let content = std::fs::read_to_string(&s.origin)
+        .with_context(|| format!("read {}", s.origin.display()))?;
+    print!("{content}");
+    Ok(())
 }
 
 fn launch_picker() -> Result<()> {
