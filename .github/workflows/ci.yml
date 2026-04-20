@@ -57,3 +57,12 @@ jobs:
       - run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit

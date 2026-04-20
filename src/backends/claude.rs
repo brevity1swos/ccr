@@ -122,11 +122,7 @@ pub(crate) fn parse_session_from_reader(id: &str, reader: impl BufRead) -> Resul
             last_ts = Some(parsed.with_timezone(&Local));
         }
 
-        let Some(role) = v
-            .get("type")
-            .and_then(|t| t.as_str())
-            .and_then(Role::parse)
-        else {
+        let Some(role) = v.get("type").and_then(|t| t.as_str()).and_then(Role::parse) else {
             continue;
         };
 

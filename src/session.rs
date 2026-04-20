@@ -38,3 +38,21 @@ pub struct Session {
     pub preview: Vec<Turn>,
     pub possibly_live: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_parse_recognizes_user_and_assistant() {
+        assert_eq!(Role::parse("user"), Some(Role::User));
+        assert_eq!(Role::parse("assistant"), Some(Role::Assistant));
+    }
+
+    #[test]
+    fn role_parse_returns_none_for_unknown() {
+        assert_eq!(Role::parse("system"), None);
+        assert_eq!(Role::parse(""), None);
+        assert_eq!(Role::parse("User"), None);
+    }
+}

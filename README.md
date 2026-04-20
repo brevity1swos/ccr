@@ -42,17 +42,31 @@ cargo install --path .
 ccr
 ```
 
-| Key        | Action                  |
-|------------|-------------------------|
-| `↑` / `k`  | up                      |
-| `↓` / `j`  | down                    |
-| `PgUp/Dn`  | jump 10                 |
-| `/`        | fuzzy-filter title/cwd  |
-| `Enter`    | `claude --resume <id>`  |
-| `q` / `Esc`| quit                    |
+| Key         | Action                                  |
+|-------------|-----------------------------------------|
+| `↑` / `k`   | up                                      |
+| `↓` / `j`   | down                                    |
+| `g` / `Home`| jump to top                             |
+| `G` / `End` | jump to bottom                          |
+| `PgUp/Dn`   | page up/down (10 rows)                  |
+| `/`         | filter by title, cwd, or tool           |
+| `Enter`     | resume selected session (live-checked)  |
+| `?` / `F1`  | help overlay                            |
+| `q` / `Esc` | quit                                    |
 
-On `Enter`, `ccr` exits the TUI and execs `claude --resume <uuid>` with the
-session's original `cwd` as the working directory.
+On `Enter`, `ccr` runs `pgrep -f <session-id>` first. If a matching process is
+found, a confirmation modal warns before spawning a second attachment (which
+would interleave JSONL writes and corrupt the session). Otherwise it execs the
+tool's resume command with the session's original `cwd`.
+
+## Environment variables
+
+| Variable            | Purpose                                                 |
+|---------------------|---------------------------------------------------------|
+| `CCR_CLAUDE_DIR`    | Full path to Claude's `projects/` dir (escape hatch)    |
+| `CLAUDE_CONFIG_DIR` | Claude Code's native override; `ccr` appends `projects` |
+
+Precedence: `CCR_CLAUDE_DIR` > `CLAUDE_CONFIG_DIR` > `~/.claude/projects`.
 
 ## How it works
 

@@ -58,8 +58,10 @@ pub fn pgrep_f(pattern: &str) -> Vec<String> {
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter(|l| {
-            let pid = l.split_whitespace().next().unwrap_or("");
-            pid != own_pid && !l.contains(" ccr") && !l.ends_with("/ccr")
+            let mut parts = l.split_whitespace();
+            let pid = parts.next().unwrap_or("");
+            let cmd = parts.next().unwrap_or("");
+            pid != own_pid && cmd != "ccr" && !cmd.ends_with("/ccr")
         })
         .map(String::from)
         .collect()

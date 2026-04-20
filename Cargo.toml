@@ -2,9 +2,13 @@
 name = "ccr"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 description = "CLI Code Resume — unified TUI session picker for CLI coding assistants (Claude Code, oh-my-opencode, …)"
 license = "MIT"
 repository = "https://github.com/brevity1swos/ccr"
+readme = "README.md"
+keywords = ["claude", "cli", "tui", "session", "ratatui"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 ratatui = "0.29"

@@ -18,6 +18,11 @@ use crate::backends::{Backend, by_name};
 use crate::session::{Role, Session};
 use crate::util::{project_basename, relative_time, truncate};
 
+const PAGE_JUMP: i32 = 10;
+const PROJECT_COL_WIDTH: usize = 18;
+const PREVIEW_LINE_WIDTH: usize = 120;
+const PREVIEW_LINES_PER_TURN: usize = 8;
+
 fn dim(s: &'static str) -> Span<'static> {
     Span::styled(s, Style::default().fg(Color::DarkGray))
 }
@@ -109,8 +114,8 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
                 KeyCode::Char('?') | KeyCode::F(1) => mode = Mode::Help,
                 KeyCode::Down | KeyCode::Char('j') => move_sel(&mut state, &visible, 1),
                 KeyCode::Up | KeyCode::Char('k') => move_sel(&mut state, &visible, -1),
-                KeyCode::PageDown => move_sel(&mut state, &visible, 10),
-                KeyCode::PageUp => move_sel(&mut state, &visible, -10),
+                KeyCode::PageDown => move_sel(&mut state, &visible, PAGE_JUMP),
+                KeyCode::PageUp => move_sel(&mut state, &visible, -PAGE_JUMP),
                 KeyCode::Home | KeyCode::Char('g') if !visible.is_empty() => {
                     state.select(Some(0));
                 }
@@ -247,7 +252,11 @@ fn render_list(f: &mut Frame, area: Rect, sessions: &[&Session], state: &mut Lis
                     Style::default().fg(Color::Magenta),
                 ),
                 Span::styled(
-                    format!("{:<18}", truncate(&project, 18)),
+                    format!(
+                        "{:<w$}",
+                        truncate(&project, PROJECT_COL_WIDTH),
+                        w = PROJECT_COL_WIDTH
+                    ),
                     Style::default()
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
@@ -309,7 +318,10 @@ fn render_preview(f: &mut Frame, area: Rect, sessions: &[&Session], state: &List
                 relative_time(s.last_activity)
             )),
         ]),
-        Line::from(vec![dim("msgs:   "), Span::raw(s.message_count.to_string())]),
+        Line::from(vec![
+            dim("msgs:   "),
+            Span::raw(s.message_count.to_string()),
+        ]),
         Line::from(vec![dim("id:     "), Span::raw(s.id.clone())]),
     ];
     if s.possibly_live {
@@ -331,8 +343,8 @@ fn render_preview(f: &mut Frame, area: Rect, sessions: &[&Session], state: &List
             tag,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )));
-        for raw in t.text.lines().take(8) {
-            lines.push(Line::from(Span::raw(truncate(raw, 120))));
+        for raw in t.text.lines().take(PREVIEW_LINES_PER_TURN) {
+            lines.push(Line::from(Span::raw(truncate(raw, PREVIEW_LINE_WIDTH))));
         }
     }
 
@@ -397,7 +409,9 @@ fn render_confirm(f: &mut Frame, area: Rect, session: &Session, pids: &[String])
         .title(" Confirm resume ")
         .border_style(Style::default().fg(Color::Yellow));
     f.render_widget(
-        Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
@@ -459,4 +473,80 @@ fn render_help(f: &mut Frame, area: Rect) {
         .title(" Help — ccr ")
         .border_style(Style::default().fg(Color::Cyan));
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Local;
+    use std::path::PathBuf;
+
+    fn sess(title: &str, cwd: &str, backend: &'static str) -> Session {
+        Session {
+            backend,
+            id: "x".into(),
+            cwd: PathBuf::from(cwd),
+            title: title.into(),
+            last_activity: Local::now(),
+            message_count: 0,
+            preview: Vec::new(),
+            possibly_live: false,
+        }
+    }
+
+    #[test]
+    fn empty_filter_matches_everything() {
+        assert!(matches_filter(&sess("hello", "/x", "claude"), ""));
+    }
+
+    #[test]
+    fn filter_matches_title_case_insensitive() {
+        assert!(matches_filter(
+            &sess("Hello World", "/x", "claude"),
+            "HELLO"
+        ));
+        assert!(matches_filter(
+            &sess("hello world", "/x", "claude"),
+            "Hello"
+        ));
+    }
+
+    #[test]
+    fn filter_matches_cwd() {
+        assert!(matches_filter(
+            &sess("x", "/home/me/proj", "claude"),
+            "proj"
+        ));
+    }
+
+    #[test]
+    fn filter_matches_backend_tag() {
+        assert!(matches_filter(&sess("x", "/y", "claude"), "claud"));
+    }
+
+    #[test]
+    fn filter_rejects_no_match() {
+        assert!(!matches_filter(&sess("hello", "/y", "claude"), "xyz"));
+    }
+
+    #[test]
+    fn move_sel_clamps_to_bounds() {
+        let mut state = ListState::default();
+        let s = sess("x", "/y", "claude");
+        let refs: Vec<&Session> = vec![&s, &s, &s];
+        move_sel(&mut state, &refs, 2);
+        assert_eq!(state.selected(), Some(2));
+        move_sel(&mut state, &refs, 5);
+        assert_eq!(state.selected(), Some(2));
+        move_sel(&mut state, &refs, -10);
+        assert_eq!(state.selected(), Some(0));
+    }
+
+    #[test]
+    fn move_sel_is_noop_on_empty_list() {
+        let mut state = ListState::default();
+        let empty: Vec<&Session> = Vec::new();
+        move_sel(&mut state, &empty, 1);
+        assert_eq!(state.selected(), None);
+    }
 }
