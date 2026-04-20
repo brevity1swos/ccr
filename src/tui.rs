@@ -15,8 +15,12 @@ use ratatui::{
 use std::io;
 
 use crate::backends::{Backend, by_name};
-use crate::session::Session;
+use crate::session::{Role, Session};
 use crate::util::{project_basename, relative_time, truncate};
+
+fn dim(s: &'static str) -> Span<'static> {
+    Span::styled(s, Style::default().fg(Color::DarkGray))
+}
 
 pub enum AppAction {
     Resume(Session),
@@ -107,15 +111,11 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
                 KeyCode::Up | KeyCode::Char('k') => move_sel(&mut state, &visible, -1),
                 KeyCode::PageDown => move_sel(&mut state, &visible, 10),
                 KeyCode::PageUp => move_sel(&mut state, &visible, -10),
-                KeyCode::Home | KeyCode::Char('g') => {
-                    if !visible.is_empty() {
-                        state.select(Some(0));
-                    }
+                KeyCode::Home | KeyCode::Char('g') if !visible.is_empty() => {
+                    state.select(Some(0));
                 }
-                KeyCode::End | KeyCode::Char('G') => {
-                    if !visible.is_empty() {
-                        state.select(Some(visible.len() - 1));
-                    }
+                KeyCode::End | KeyCode::Char('G') if !visible.is_empty() => {
+                    state.select(Some(visible.len() - 1));
                 }
                 KeyCode::Enter => {
                     if let Some(sel) = state.selected()
@@ -231,7 +231,7 @@ fn ui(f: &mut Frame, sessions: &[&Session], state: &mut ListState, filter: &str,
     match mode {
         Mode::Confirm { session, pids } => render_confirm(f, size, session, pids),
         Mode::Help => render_help(f, size),
-        _ => {}
+        Mode::List | Mode::Filter => {}
     }
 }
 
@@ -281,7 +281,7 @@ fn render_list(f: &mut Frame, area: Rect, sessions: &[&Session], state: &mut Lis
     f.render_stateful_widget(list, area, state);
 }
 
-fn render_preview(f: &mut Frame, area: Rect, sessions: &[&Session], state: &mut ListState) {
+fn render_preview(f: &mut Frame, area: Rect, sessions: &[&Session], state: &ListState) {
     let block = Block::default().borders(Borders::ALL).title(" Preview ");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -291,32 +291,26 @@ fn render_preview(f: &mut Frame, area: Rect, sessions: &[&Session], state: &mut 
 
     let mut lines: Vec<Line> = vec![
         Line::from(vec![
-            Span::styled("tool:   ", Style::default().fg(Color::DarkGray)),
+            dim("tool:   "),
             Span::styled(s.backend, Style::default().fg(Color::Magenta)),
         ]),
         Line::from(vec![
-            Span::styled("cwd:    ", Style::default().fg(Color::DarkGray)),
+            dim("cwd:    "),
             Span::styled(
                 s.cwd.display().to_string(),
                 Style::default().fg(Color::Green),
             ),
         ]),
         Line::from(vec![
-            Span::styled("last:   ", Style::default().fg(Color::DarkGray)),
+            dim("last:   "),
             Span::raw(format!(
                 "{}  ({})",
                 s.last_activity.format("%Y-%m-%d %H:%M"),
                 relative_time(s.last_activity)
             )),
         ]),
-        Line::from(vec![
-            Span::styled("msgs:   ", Style::default().fg(Color::DarkGray)),
-            Span::raw(s.message_count.to_string()),
-        ]),
-        Line::from(vec![
-            Span::styled("id:     ", Style::default().fg(Color::DarkGray)),
-            Span::raw(s.id.clone()),
-        ]),
+        Line::from(vec![dim("msgs:   "), Span::raw(s.message_count.to_string())]),
+        Line::from(vec![dim("id:     "), Span::raw(s.id.clone())]),
     ];
     if s.possibly_live {
         lines.push(Line::from(Span::styled(
@@ -325,16 +319,12 @@ fn render_preview(f: &mut Frame, area: Rect, sessions: &[&Session], state: &mut 
         )));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "── recent turns ──",
-        Style::default().fg(Color::DarkGray),
-    )));
+    lines.push(Line::from(dim("── recent turns ──")));
 
     for t in &s.preview {
-        let (tag, color) = if t.role == "user" {
-            ("❯ user", Color::Cyan)
-        } else {
-            ("◆ asst", Color::Magenta)
+        let (tag, color) = match t.role {
+            Role::User => ("❯ user", Color::Cyan),
+            Role::Assistant => ("◆ asst", Color::Magenta),
         };
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -369,23 +359,14 @@ fn render_confirm(f: &mut Frame, area: Rect, session: &Session, pids: &[String])
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
+        Line::from(vec![dim("tool:    "), Span::raw(session.backend)]),
+        Line::from(vec![dim("session: "), Span::raw(&session.id)]),
         Line::from(vec![
-            Span::styled("tool:    ", Style::default().fg(Color::DarkGray)),
-            Span::raw(session.backend),
-        ]),
-        Line::from(vec![
-            Span::styled("session: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(&session.id),
-        ]),
-        Line::from(vec![
-            Span::styled("cwd:     ", Style::default().fg(Color::DarkGray)),
+            dim("cwd:     "),
             Span::raw(session.cwd.display().to_string()),
         ]),
         Line::from(""),
-        Line::from(Span::styled(
-            "matching processes:",
-            Style::default().fg(Color::DarkGray),
-        )),
+        Line::from(dim("matching processes:")),
     ];
     for p in pids {
         lines.push(Line::from(Span::raw(truncate(p, 76))));

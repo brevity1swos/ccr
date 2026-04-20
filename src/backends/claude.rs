@@ -1,13 +1,14 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, TimeZone};
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::backends::Backend;
-use crate::session::{PREVIEW_TURNS, Session, TITLE_MAX, Turn};
+use crate::session::{PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn};
 use crate::util::{is_possibly_live, truncate};
 
 pub struct ClaudeBackend;
@@ -16,11 +17,7 @@ impl ClaudeBackend {
     const NAME: &'static str = "claude";
 
     /// Resolve the Claude Code `projects/` directory.
-    ///
-    /// Precedence:
-    /// 1. `CCR_CLAUDE_DIR` — full path to the `projects/` dir (escape hatch)
-    /// 2. `CLAUDE_CONFIG_DIR` — Claude Code's own override; we append `projects`
-    /// 3. `~/.claude/projects` — default
+    /// Precedence: `CCR_CLAUDE_DIR` > `CLAUDE_CONFIG_DIR` + `/projects` > `~/.claude/projects`.
     fn projects_dir() -> Result<PathBuf> {
         if let Ok(dir) = std::env::var("CCR_CLAUDE_DIR") {
             return Ok(PathBuf::from(dir));
@@ -55,7 +52,17 @@ impl Backend for ClaudeBackend {
                 if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                     continue;
                 }
-                if let Ok(Some(s)) = parse_session(&p) {
+                let Some(id) = p
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .filter(|s| !s.is_empty())
+                else {
+                    continue;
+                };
+                let Ok(file) = fs::File::open(&p) else {
+                    continue;
+                };
+                if let Ok(s) = parse_session_from_reader(id, BufReader::new(file)) {
                     out.push(s);
                 }
             }
@@ -72,7 +79,7 @@ impl Backend for ClaudeBackend {
 
 fn extract_text(content: &Value) -> String {
     match content {
-        Value::String(s) => s.clone(),
+        Value::String(s) => s.to_string(),
         Value::Array(arr) => arr
             .iter()
             .filter_map(|c| {
@@ -88,25 +95,12 @@ fn extract_text(content: &Value) -> String {
     }
 }
 
-pub(crate) fn parse_session(path: &Path) -> Result<Option<Session>> {
-    let id = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string();
-    if id.is_empty() {
-        return Ok(None);
-    }
-    let file = fs::File::open(path)?;
-    parse_session_from_reader(&id, BufReader::new(file))
-}
-
-pub(crate) fn parse_session_from_reader(id: &str, reader: impl BufRead) -> Result<Option<Session>> {
+pub(crate) fn parse_session_from_reader(id: &str, reader: impl BufRead) -> Result<Session> {
     let mut cwd: Option<PathBuf> = None;
     let mut title: Option<String> = None;
     let mut last_ts: Option<DateTime<Local>> = None;
     let mut message_count = 0usize;
-    let mut turns: Vec<Turn> = Vec::new();
+    let mut turns: VecDeque<Turn> = VecDeque::with_capacity(PREVIEW_TURNS);
 
     for line in reader.lines() {
         let Ok(line) = line else { continue };
@@ -128,46 +122,45 @@ pub(crate) fn parse_session_from_reader(id: &str, reader: impl BufRead) -> Resul
             last_ts = Some(parsed.with_timezone(&Local));
         }
 
-        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        if kind == "user" || kind == "assistant" {
-            let content = v
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .cloned()
-                .unwrap_or(Value::Null);
-            let text = extract_text(&content);
-            if text.trim().is_empty() {
-                continue;
-            }
-            message_count += 1;
-            if kind == "user" && title.is_none() {
-                title = Some(truncate(&text, TITLE_MAX));
-            }
-            turns.push(Turn {
-                role: kind.to_string(),
-                text,
-            });
+        let Some(role) = v
+            .get("type")
+            .and_then(|t| t.as_str())
+            .and_then(Role::parse)
+        else {
+            continue;
+        };
+
+        let Some(content) = v.get("message").and_then(|m| m.get("content")) else {
+            continue;
+        };
+        let text = extract_text(content);
+        if text.trim().is_empty() {
+            continue;
         }
+        message_count += 1;
+        if role == Role::User && title.is_none() {
+            title = Some(truncate(&text, TITLE_MAX));
+        }
+        if turns.len() == PREVIEW_TURNS {
+            turns.pop_front();
+        }
+        turns.push_back(Turn { role, text });
     }
 
     let cwd = cwd.unwrap_or_else(|| PathBuf::from("(unknown)"));
     let title = title.unwrap_or_else(|| "(no user message)".into());
     let last_activity = last_ts.unwrap_or_else(|| Local.timestamp_opt(0, 0).unwrap());
-    let possibly_live = is_possibly_live(last_activity);
 
-    let preview_start = turns.len().saturating_sub(PREVIEW_TURNS);
-    let preview = turns[preview_start..].to_vec();
-
-    Ok(Some(Session {
+    Ok(Session {
         backend: ClaudeBackend::NAME,
         id: id.to_string(),
         cwd,
         title,
         last_activity,
         message_count,
-        preview,
-        possibly_live,
-    }))
+        preview: turns.into_iter().collect(),
+        possibly_live: is_possibly_live(last_activity),
+    })
 }
 
 #[cfg(test)]
@@ -176,9 +169,7 @@ mod tests {
     use std::io::Cursor;
 
     fn parse(jsonl: &str) -> Session {
-        parse_session_from_reader("abc-123", Cursor::new(jsonl))
-            .expect("parse ok")
-            .expect("non-empty session")
+        parse_session_from_reader("abc-123", Cursor::new(jsonl)).expect("parse ok")
     }
 
     #[test]
@@ -193,6 +184,8 @@ mod tests {
         assert_eq!(s.title, "hello world");
         assert_eq!(s.message_count, 2);
         assert_eq!(s.preview.len(), 2);
+        assert_eq!(s.preview[0].role, Role::User);
+        assert_eq!(s.preview[1].role, Role::Assistant);
     }
 
     #[test]
@@ -239,7 +232,7 @@ mod tests {
 "#
         );
         let s = parse(&jsonl);
-        assert!(s.title.chars().count() <= TITLE_MAX + 1); // +1 for the ellipsis
+        assert!(s.title.chars().count() <= TITLE_MAX + 1);
         assert!(s.title.ends_with('…'));
     }
 
@@ -251,5 +244,20 @@ mod tests {
 "#;
         let s = parse(jsonl);
         assert_eq!(s.cwd, PathBuf::from("/first"));
+    }
+
+    #[test]
+    fn preview_is_capped_at_last_preview_turns() {
+        let mut jsonl = String::new();
+        for i in 0..20 {
+            jsonl.push_str(&format!(
+                r#"{{"type":"user","cwd":"/x","timestamp":"2026-04-19T10:00:00Z","message":{{"content":"msg {i}"}}}}
+"#
+            ));
+        }
+        let s = parse(&jsonl);
+        assert_eq!(s.message_count, 20);
+        assert_eq!(s.preview.len(), PREVIEW_TURNS);
+        assert_eq!(s.preview.last().unwrap().text, "msg 19");
     }
 }
