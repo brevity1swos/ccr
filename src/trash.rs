@@ -87,7 +87,7 @@ fn list_trashed_in(root: &Path) -> Result<Vec<TrashedItem>> {
             });
         }
     }
-    items.sort_by(|a, b| b.trashed_at.cmp(&a.trashed_at));
+    items.sort_by_key(|i| std::cmp::Reverse(i.trashed_at));
     Ok(items)
 }
 
