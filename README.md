@@ -1,15 +1,20 @@
-# ccr — CLI Code Resume
+<h1 align="center">ccr — CLI Code Resume</h1>
 
-[![crates.io](https://img.shields.io/crates/v/ccr?style=flat-square&labelColor=black)](https://crates.io/crates/ccr)
-[![CI](https://img.shields.io/github/actions/workflow/status/brevity1swos/ccr/ci.yml?style=flat-square&label=CI&labelColor=black)](https://github.com/brevity1swos/ccr/actions/workflows/ci.yml)
-[![Downloads](https://img.shields.io/crates/d/ccr?style=flat-square&labelColor=black)](https://crates.io/crates/ccr)
-[![License](https://img.shields.io/crates/l/ccr?style=flat-square&labelColor=black)](./LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.88-informational?style=flat-square&labelColor=black)](./Cargo.toml)
+<p align="center">
+  <em>One TUI session picker across every CLI coding assistant you use.</em>
+</p>
 
-A terminal UI session picker for CLI coding assistants. One picker across
-every tool you use, with cross-tool filter, sort, and cleanup.
+<p align="center">
+  <a href="https://crates.io/crates/ccr"><img src="https://img.shields.io/crates/v/ccr?style=flat-square&labelColor=black&color=orange" alt="crates.io"></a>
+  <a href="https://github.com/brevity1swos/ccr/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/brevity1swos/ccr/ci.yml?branch=main&style=flat-square&label=CI&labelColor=black" alt="CI"></a>
+  <a href="https://crates.io/crates/ccr"><img src="https://img.shields.io/crates/d/ccr?style=flat-square&labelColor=black" alt="Downloads"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/crates/l/ccr?style=flat-square&labelColor=black" alt="License"></a>
+  <a href="./Cargo.toml"><img src="https://img.shields.io/badge/MSRV-1.88-informational?style=flat-square&labelColor=black" alt="MSRV"></a>
+</p>
 
-**Supported today:** Claude Code, Codex, Gemini CLI.
+<p align="center">
+  <strong>Supported:</strong> Claude Code · Codex · Gemini CLI
+</p>
 
 ## What it does
 
