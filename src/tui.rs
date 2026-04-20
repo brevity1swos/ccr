@@ -14,6 +14,9 @@ use ratatui::{
 };
 use std::io;
 
+use chrono::Local;
+
+use crate::age::parse_age;
 use crate::backends::{Backend, by_name};
 use crate::session::{Role, Session};
 use crate::util::{project_basename, relative_time, truncate};
@@ -23,7 +26,7 @@ const PROJECT_COL_WIDTH: usize = 18;
 const PREVIEW_LINE_WIDTH: usize = 120;
 const PREVIEW_LINES_PER_TURN: usize = 8;
 
-fn dim(s: &'static str) -> Span<'static> {
+fn dim<S: Into<std::borrow::Cow<'static, str>>>(s: S) -> Span<'static> {
     Span::styled(s, Style::default().fg(Color::DarkGray))
 }
 
@@ -35,11 +38,25 @@ pub enum AppAction {
 enum Mode {
     List,
     Filter,
-    Confirm { session: Session, pids: Vec<String> },
+    Confirm {
+        session: Session,
+        pids: Vec<String>,
+    },
     Help,
+    DeleteConfirm {
+        session: Session,
+    },
+    PruneInput {
+        buf: String,
+        error: Option<String>,
+    },
+    PruneConfirm {
+        age_str: String,
+        matching: Vec<Session>,
+    },
 }
 
-pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppAction> {
+pub fn run(mut sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppAction> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -122,6 +139,21 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
                 KeyCode::End | KeyCode::Char('G') if !visible.is_empty() => {
                     state.select(Some(visible.len() - 1));
                 }
+                KeyCode::Char('d') => {
+                    if let Some(sel) = state.selected()
+                        && let Some(s) = visible.get(sel)
+                    {
+                        mode = Mode::DeleteConfirm {
+                            session: (*s).clone(),
+                        };
+                    }
+                }
+                KeyCode::Char('D') => {
+                    mode = Mode::PruneInput {
+                        buf: "90d".into(),
+                        error: None,
+                    };
+                }
                 KeyCode::Enter => {
                     if let Some(sel) = state.selected()
                         && let Some(s) = visible.get(sel)
@@ -138,6 +170,75 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
                         };
                     }
                 }
+                _ => {}
+            },
+            Mode::DeleteConfirm { session } => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    let sess = session.clone();
+                    if let Some(b) = by_name(backends, sess.backend)
+                        && b.trash(&sess).is_ok()
+                    {
+                        sessions.retain(|s| !(s.id == sess.id && s.backend == sess.backend));
+                    }
+                    mode = Mode::List;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => mode = Mode::List,
+                _ => {}
+            },
+            Mode::PruneInput { buf, error: _ } => {
+                let mut next_buf = buf.clone();
+                match key.code {
+                    KeyCode::Esc => mode = Mode::List,
+                    KeyCode::Char(c) => {
+                        next_buf.push(c);
+                        mode = Mode::PruneInput {
+                            buf: next_buf,
+                            error: None,
+                        };
+                    }
+                    KeyCode::Backspace => {
+                        next_buf.pop();
+                        mode = Mode::PruneInput {
+                            buf: next_buf,
+                            error: None,
+                        };
+                    }
+                    KeyCode::Enter => match parse_age(&next_buf) {
+                        Some(dur) => {
+                            let threshold = Local::now() - dur;
+                            let matching: Vec<Session> = sessions
+                                .iter()
+                                .filter(|s| s.last_activity < threshold)
+                                .cloned()
+                                .collect();
+                            mode = Mode::PruneConfirm {
+                                age_str: next_buf,
+                                matching,
+                            };
+                        }
+                        None => {
+                            mode = Mode::PruneInput {
+                                buf: next_buf,
+                                error: Some("use forms like 30d, 2w, 3mo, 1y".into()),
+                            };
+                        }
+                    },
+                    _ => {}
+                }
+            }
+            Mode::PruneConfirm { matching, .. } => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    let to_trash = matching.clone();
+                    for s in &to_trash {
+                        if let Some(b) = by_name(backends, s.backend)
+                            && b.trash(s).is_ok()
+                        {
+                            sessions.retain(|x| !(x.id == s.id && x.backend == s.backend));
+                        }
+                    }
+                    mode = Mode::List;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => mode = Mode::List,
                 _ => {}
             },
         }
@@ -225,9 +326,17 @@ fn ui(f: &mut Frame, sessions: &[&Session], state: &mut ListState, filter: &str,
             " confirm: y = resume anyway · n/Esc = cancel ",
             Style::default().fg(Color::Yellow),
         ),
+        Mode::DeleteConfirm { .. } => Span::styled(
+            " delete: y = trash · n/Esc = cancel ",
+            Style::default().fg(Color::Red),
+        ),
+        Mode::PruneInput { .. } | Mode::PruneConfirm { .. } => Span::styled(
+            " prune: Enter apply · Esc cancel ",
+            Style::default().fg(Color::Yellow),
+        ),
         Mode::Help => Span::styled(" ? / Esc to close ", Style::default().fg(Color::DarkGray)),
         Mode::List => Span::styled(
-            " ↑↓/jk · g/G top/bottom · Enter resume · / filter · ? help · q quit ",
+            " ↑↓/jk · g/G top/bottom · Enter resume · d delete · D prune · / filter · ? help · q quit ",
             Style::default().fg(Color::DarkGray),
         ),
     };
@@ -236,6 +345,11 @@ fn ui(f: &mut Frame, sessions: &[&Session], state: &mut ListState, filter: &str,
     match mode {
         Mode::Confirm { session, pids } => render_confirm(f, size, session, pids),
         Mode::Help => render_help(f, size),
+        Mode::DeleteConfirm { session } => render_delete_confirm(f, size, session),
+        Mode::PruneInput { buf, error } => render_prune_input(f, size, buf, error.as_deref()),
+        Mode::PruneConfirm { age_str, matching } => {
+            render_prune_confirm(f, size, age_str, matching)
+        }
         Mode::List | Mode::Filter => {}
     }
 }
@@ -416,6 +530,175 @@ fn render_confirm(f: &mut Frame, area: Rect, session: &Session, pids: &[String])
     );
 }
 
+fn render_delete_confirm(f: &mut Frame, area: Rect, session: &Session) {
+    let area = centered(area, 70, 12);
+    f.render_widget(Clear, area);
+    let lines = vec![
+        Line::from(Span::styled(
+            "⚠  Move session to trash?",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![dim("tool:    "), Span::raw(session.backend)]),
+        Line::from(vec![dim("id:      "), Span::raw(&session.id)]),
+        Line::from(vec![
+            dim("cwd:     "),
+            Span::raw(session.cwd.display().to_string()),
+        ]),
+        Line::from(vec![
+            dim("title:   "),
+            Span::raw(truncate(&session.title, 60)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "File moved to ~/.ccr/trash/ (restorable for 30 days).",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "[y]",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" trash    "),
+            Span::styled(
+                "[n]",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" cancel"),
+        ]),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Delete session ")
+        .border_style(Style::default().fg(Color::Red));
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_prune_input(f: &mut Frame, area: Rect, buf: &str, error: Option<&str>) {
+    let area = centered(area, 64, 10);
+    f.render_widget(Clear, area);
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Prune sessions older than:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            dim("  age:   "),
+            Span::styled(
+                format!("{buf}_"),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(dim("          (examples: 30d, 2w, 3mo, 1y)")),
+        Line::from(""),
+    ];
+    if let Some(err) = error {
+        lines.push(Line::from(Span::styled(
+            format!("  error: {err}"),
+            Style::default().fg(Color::Red),
+        )));
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        "Enter to preview · Esc to cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Prune by age ")
+        .border_style(Style::default().fg(Color::Yellow));
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_prune_confirm(f: &mut Frame, area: Rect, age_str: &str, matching: &[Session]) {
+    let h = (matching.len().min(8) as u16) + 10;
+    let area = centered(area, 80, h);
+    f.render_widget(Clear, area);
+    let title = if matching.is_empty() {
+        format!("No sessions older than {age_str}")
+    } else {
+        format!(
+            "Move {} session(s) older than {age_str} to trash?",
+            matching.len()
+        )
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    for s in matching.iter().take(8) {
+        lines.push(Line::from(vec![
+            dim(format!(" {} ", s.last_activity.format("%Y-%m-%d"))),
+            Span::styled(
+                format!(" [{}] ", s.backend),
+                Style::default().fg(Color::Magenta),
+            ),
+            Span::raw(truncate(&s.title, 56)),
+        ]));
+    }
+    if matching.len() > 8 {
+        lines.push(Line::from(dim(format!(
+            "  … and {} more",
+            matching.len() - 8
+        ))));
+    }
+    lines.push(Line::from(""));
+    if matching.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "[Esc] close",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "[y]",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" trash all    "),
+            Span::styled(
+                "[n]",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" cancel"),
+        ]));
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Prune confirm ")
+        .border_style(Style::default().fg(Color::Yellow));
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 fn render_help(f: &mut Frame, area: Rect) {
     let area = centered(area, 70, 22);
     f.render_widget(Clear, area);
@@ -450,6 +733,8 @@ fn render_help(f: &mut Frame, area: Rect) {
         Line::from(""),
         section("Actions"),
         k("Enter", "resume selected session (with live-check)"),
+        k("d", "delete selected (soft — moves to ~/.ccr/trash/)"),
+        k("D", "prune by age (7d/30d/90d/1y/custom)"),
         k("/", "filter by title, cwd, or tool"),
         k("? / F1", "this help"),
         k("q / Esc", "quit"),
@@ -491,6 +776,7 @@ mod tests {
             message_count: 0,
             preview: Vec::new(),
             possibly_live: false,
+            origin: PathBuf::from("<test>"),
         }
     }
 

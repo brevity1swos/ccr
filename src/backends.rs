@@ -29,6 +29,14 @@ pub trait Backend: Send + Sync {
     fn running(&self, s: &Session) -> Vec<String> {
         pgrep_f(&s.id)
     }
+
+    /// Move this session's on-disk files to the ccr trash directory.
+    /// Default: rename `session.origin` into `~/.ccr/trash/<backend>/<id>.jsonl`.
+    /// Override when the tool stores multiple files per session.
+    fn trash(&self, s: &Session) -> Result<()> {
+        crate::trash::move_to_trash(&s.origin, self.name(), &s.id)?;
+        Ok(())
+    }
 }
 
 pub fn all() -> Vec<Box<dyn Backend>> {

@@ -37,6 +37,9 @@ pub struct Session {
     pub message_count: usize,
     pub preview: Vec<Turn>,
     pub possibly_live: bool,
+    /// Absolute path to the on-disk file this session was parsed from.
+    /// Used by `Backend::trash` to move the file without rescanning.
+    pub origin: PathBuf,
 }
 
 #[cfg(test)]

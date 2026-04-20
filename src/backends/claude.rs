@@ -62,7 +62,7 @@ impl Backend for ClaudeBackend {
                 let Ok(file) = fs::File::open(&p) else {
                     continue;
                 };
-                if let Ok(s) = parse_session_from_reader(id, BufReader::new(file)) {
+                if let Ok(s) = parse_session_from_reader(id, p.clone(), BufReader::new(file)) {
                     out.push(s);
                 }
             }
@@ -95,7 +95,11 @@ fn extract_text(content: &Value) -> String {
     }
 }
 
-pub(crate) fn parse_session_from_reader(id: &str, reader: impl BufRead) -> Result<Session> {
+pub(crate) fn parse_session_from_reader(
+    id: &str,
+    origin: PathBuf,
+    reader: impl BufRead,
+) -> Result<Session> {
     let mut cwd: Option<PathBuf> = None;
     let mut title: Option<String> = None;
     let mut last_ts: Option<DateTime<Local>> = None;
@@ -156,6 +160,7 @@ pub(crate) fn parse_session_from_reader(id: &str, reader: impl BufRead) -> Resul
         message_count,
         preview: turns.into_iter().collect(),
         possibly_live: is_possibly_live(last_activity),
+        origin,
     })
 }
 
@@ -165,7 +170,8 @@ mod tests {
     use std::io::Cursor;
 
     fn parse(jsonl: &str) -> Session {
-        parse_session_from_reader("abc-123", Cursor::new(jsonl)).expect("parse ok")
+        parse_session_from_reader("abc-123", PathBuf::from("<test>"), Cursor::new(jsonl))
+            .expect("parse ok")
     }
 
     #[test]
