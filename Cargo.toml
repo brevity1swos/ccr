@@ -3,12 +3,22 @@ name = "ccr"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "CLI Code Resume — unified TUI session picker for CLI coding assistants (Claude Code, oh-my-opencode, …)"
+description = "CLI Code Resume — one TUI session picker across Claude Code, Codex, and Gemini CLI"
 license = "MIT"
 repository = "https://github.com/brevity1swos/ccr"
+homepage = "https://github.com/brevity1swos/ccr"
+documentation = "https://docs.rs/ccr"
 readme = "README.md"
-keywords = ["claude", "cli", "tui", "session", "ratatui"]
+authors = ["brevity1swos <brevity1s.wos@gmail.com>"]
+keywords = ["claude", "codex", "gemini", "tui", "ratatui"]
 categories = ["command-line-utilities", "development-tools"]
+include = [
+    "src/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+]
 
 [dependencies]
 ratatui = "0.29"

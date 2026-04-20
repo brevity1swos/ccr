@@ -1,5 +1,11 @@
 # ccr — CLI Code Resume
 
+[![crates.io](https://img.shields.io/crates/v/ccr?style=flat-square&labelColor=black)](https://crates.io/crates/ccr)
+[![CI](https://img.shields.io/github/actions/workflow/status/brevity1swos/ccr/ci.yml?style=flat-square&label=CI&labelColor=black)](https://github.com/brevity1swos/ccr/actions/workflows/ci.yml)
+[![Downloads](https://img.shields.io/crates/d/ccr?style=flat-square&labelColor=black)](https://crates.io/crates/ccr)
+[![License](https://img.shields.io/crates/l/ccr?style=flat-square&labelColor=black)](./LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.88-informational?style=flat-square&labelColor=black)](./Cargo.toml)
+
 A terminal UI session picker for CLI coding assistants. One picker across
 every tool you use, with cross-tool filter, sort, and cleanup.
 
@@ -51,6 +57,12 @@ second attachment:
 ```
 
 ## Install
+
+```sh
+cargo install ccr
+```
+
+Or from source:
 
 ```sh
 cargo install --path .
