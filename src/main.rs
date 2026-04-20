@@ -71,6 +71,16 @@ fn launch_picker() -> Result<()> {
                 .with_context(|| format!("failed to spawn `{}` — is it on PATH?", s.backend))?;
             std::process::exit(status.code().unwrap_or(1));
         }
+        AppAction::View(s) => {
+            let status = std::process::Command::new("agx")
+                .arg(&s.origin)
+                .current_dir(&s.cwd)
+                .status()
+                .context(
+                    "failed to spawn `agx` — install from https://github.com/brevity1swos/agx",
+                )?;
+            std::process::exit(status.code().unwrap_or(1));
+        }
     }
 }
 

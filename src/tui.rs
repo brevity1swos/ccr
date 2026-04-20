@@ -32,6 +32,7 @@ fn dim<S: Into<std::borrow::Cow<'static, str>>>(s: S) -> Span<'static> {
 
 pub enum AppAction {
     Resume(Session),
+    View(Session),
     Quit,
 }
 
@@ -153,6 +154,13 @@ pub fn run(mut sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<
                         buf: "90d".into(),
                         error: None,
                     };
+                }
+                KeyCode::Char('v') | KeyCode::Char('V') => {
+                    if let Some(sel) = state.selected()
+                        && let Some(s) = visible.get(sel)
+                    {
+                        break AppAction::View((*s).clone());
+                    }
                 }
                 KeyCode::Enter => {
                     if let Some(sel) = state.selected()
@@ -342,7 +350,7 @@ fn ui(f: &mut Frame, sessions: &[&Session], state: &mut ListState, filter: &str,
         ),
         Mode::Help => Span::styled(" ? / Esc to close ", Style::default().fg(Color::DarkGray)),
         Mode::List => Span::styled(
-            " ↑↓/jk · g/G top/bottom · Enter resume · d delete · D prune · / filter · ? help · q quit ",
+            " Enter resume · v view · d delete · D prune · / filter · ? help · q quit ",
             Style::default().fg(Color::DarkGray),
         ),
     };
@@ -739,6 +747,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         Line::from(""),
         section("Actions"),
         k("Enter", "resume selected session (with live-check)"),
+        k("v", "view session turns in agx (requires `agx` on PATH)"),
         k("d", "delete selected (soft — moves to ~/.ccr/trash/)"),
         k("D", "prune by age (7d/30d/90d/1y/custom)"),
         k("/", "filter: title, cwd, tool, or preview content"),

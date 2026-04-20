@@ -88,8 +88,11 @@ ccr
 | `PgUp/Dn`   | page up/down (10 rows)                  |
 | `/`         | filter: title, cwd, tool, or preview content |
 | `Enter`     | resume selected session (live-checked)  |
+| `v`         | open session in [agx] (timeline viewer) |
 | `?` / `F1`  | help overlay                            |
 | `q` / `Esc` | quit                                    |
+
+[agx]: https://github.com/brevity1swos/agx
 
 On `Enter`, `ccr` runs `pgrep -f <session-id>` first. If a matching process is
 found, a confirmation modal warns before spawning a second attachment (which
