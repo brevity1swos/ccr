@@ -34,6 +34,11 @@ enum Command {
     },
     /// List all sessions as plain text (tool id date title).
     List,
+    /// Restore a previously soft-deleted session from ~/.ccr/trash/.
+    Restore {
+        /// Session id to restore. Omit for interactive numeric prompt.
+        id: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -47,6 +52,7 @@ fn main() -> Result<()> {
             dry_run,
         }) => run_prune(&older_than, dry_run),
         Some(Command::List) => run_list(),
+        Some(Command::Restore { id }) => run_restore(id.as_deref()),
     }
 }
 
@@ -137,6 +143,66 @@ fn run_prune(age_str: &str, dry_run: bool) -> Result<()> {
     if fail > 0 {
         eprintln!("{fail} failed — see stderr above");
     }
+    Ok(())
+}
+
+fn run_restore(id: Option<&str>) -> Result<()> {
+    let items = trash::list_trashed()?;
+    if items.is_empty() {
+        println!("ccr: trash is empty");
+        return Ok(());
+    }
+
+    if let Some(needle) = id {
+        let item = items
+            .iter()
+            .find(|i| i.id == needle)
+            .with_context(|| format!("no trashed session with id `{needle}`"))?;
+        trash::restore(item)?;
+        println!(
+            "restored [{}] {} → {}",
+            item.backend,
+            item.id,
+            item.origin.display()
+        );
+        return Ok(());
+    }
+
+    println!("Trashed sessions:\n");
+    for (i, item) in items.iter().enumerate() {
+        let age = chrono::DateTime::<chrono::Local>::from(item.trashed_at).format("%Y-%m-%d %H:%M");
+        println!(
+            "  {:>3}. [{}] {}  trashed {}  → {}",
+            i + 1,
+            item.backend,
+            item.id,
+            age,
+            item.origin.display()
+        );
+    }
+    print!("\nRestore # (q to cancel): ");
+    use std::io::Write;
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let line = line.trim();
+    if line.is_empty() || line == "q" {
+        println!("cancelled");
+        return Ok(());
+    }
+    let n: usize = line
+        .parse()
+        .with_context(|| format!("invalid number: {line}"))?;
+    let item = items
+        .get(n.saturating_sub(1))
+        .with_context(|| format!("out of range: {n}"))?;
+    trash::restore(item)?;
+    println!(
+        "restored [{}] {} → {}",
+        item.backend,
+        item.id,
+        item.origin.display()
+    );
     Ok(())
 }
 

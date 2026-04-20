@@ -106,10 +106,14 @@ tool's resume command with the session's original `cwd`.
 | `d`                        | soft-delete selected session (confirm modal)           |
 | `D`                        | prune-by-age modal — default `90d`, accepts `Nd/Nw/Nmo/Ny` |
 | `ccr prune --older-than N` | non-interactive bulk trash; `--dry-run` to preview     |
+| `ccr restore`              | interactive picker over trashed sessions (moves back)  |
+| `ccr restore <id>`         | non-interactive restore by session id                  |
 | `ccr list`                 | plain-text dump of all sessions (tool id date title)   |
 
-Soft-deletes go to `~/.ccr/trash/<tool>/<id>.jsonl` and are auto-pruned after
-30 days. Restore by moving the file back to its original location.
+Soft-deletes go to `~/.ccr/trash/<tool>/<id>.jsonl` with a sidecar
+`<id>.meta.json` recording the original path. `ccr restore` reads the
+sidecar and moves the file back. Anything untouched for 30 days is
+hard-pruned automatically on next launch.
 
 ## Environment variables
 
