@@ -29,6 +29,7 @@ chrono = { version = "0.4", features = ["serde", "clock"] }
 anyhow = "1"
 dirs = "5"
 clap = { version = "4", features = ["derive"] }
+rayon = "1"
 
 [profile.release]
 lto = "thin"

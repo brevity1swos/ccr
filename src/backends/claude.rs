@@ -7,6 +7,8 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::Command;
 
+use rayon::prelude::*;
+
 use crate::backends::Backend;
 use crate::session::{PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn, append_searchable};
 use crate::util::{is_possibly_live, truncate};
@@ -40,7 +42,7 @@ impl Backend for ClaudeBackend {
         if !root.exists() {
             return Ok(Vec::new());
         }
-        let mut out = Vec::new();
+        let mut files = Vec::new();
         for entry in fs::read_dir(&root).with_context(|| format!("read_dir {}", root.display()))? {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
@@ -52,21 +54,22 @@ impl Backend for ClaudeBackend {
                 if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                     continue;
                 }
-                let Some(id) = p
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .filter(|s| !s.is_empty())
-                else {
-                    continue;
-                };
-                let Ok(file) = fs::File::open(&p) else {
-                    continue;
-                };
-                if let Ok(s) = parse_session_from_reader(id, p.clone(), BufReader::new(file)) {
-                    out.push(s);
-                }
+                files.push(p);
             }
         }
+        // Parallel parse — dominates on NFS / shared filesystems where
+        // per-file latency is the bottleneck (HPC home dirs, etc.).
+        let out: Vec<Session> = files
+            .par_iter()
+            .filter_map(|p| {
+                let id = p
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .filter(|s| !s.is_empty())?;
+                let file = fs::File::open(p).ok()?;
+                parse_session_from_reader(id, p.clone(), BufReader::new(file)).ok()
+            })
+            .collect();
         Ok(out)
     }
 

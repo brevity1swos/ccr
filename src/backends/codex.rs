@@ -7,6 +7,8 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rayon::prelude::*;
+
 use crate::backends::Backend;
 use crate::session::{PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn, append_searchable};
 use crate::util::{is_possibly_live, truncate};
@@ -42,12 +44,11 @@ impl Backend for CodexBackend {
         }
         let mut files = Vec::new();
         walk_jsonl(&root, &mut files)?;
-        let mut out = Vec::with_capacity(files.len());
-        for p in files {
-            if let Ok(Some(s)) = parse_session(&p) {
-                out.push(s);
-            }
-        }
+        // Parallel parse — see claude backend comment on HPC latency.
+        let out: Vec<Session> = files
+            .par_iter()
+            .filter_map(|p| parse_session(p).ok().flatten())
+            .collect();
         Ok(out)
     }
 

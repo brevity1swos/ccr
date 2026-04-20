@@ -6,6 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rayon::prelude::*;
+
 use crate::backends::Backend;
 use crate::session::{PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn, append_searchable};
 use crate::util::{is_possibly_live, truncate};
@@ -59,7 +61,9 @@ impl Backend for GeminiBackend {
         }
         let projects = Self::load_project_map(&root);
 
-        let mut out = Vec::new();
+        // Collect (path, cwd) pairs sequentially (directory walk), then
+        // parse files in parallel — see claude backend comment.
+        let mut work: Vec<(PathBuf, PathBuf)> = Vec::new();
         for entry in fs::read_dir(&tmp).with_context(|| format!("read_dir {}", tmp.display()))? {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
@@ -80,11 +84,13 @@ impl Backend for GeminiBackend {
                 if p.extension().and_then(|e| e.to_str()) != Some("json") {
                     continue;
                 }
-                if let Ok(Some(s)) = parse_session(&p, cwd.clone()) {
-                    out.push(s);
-                }
+                work.push((p, cwd.clone()));
             }
         }
+        let out: Vec<Session> = work
+            .par_iter()
+            .filter_map(|(p, cwd)| parse_session(p, cwd.clone()).ok().flatten())
+            .collect();
         Ok(out)
     }
 
