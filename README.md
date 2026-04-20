@@ -14,20 +14,42 @@ by last activity, and resumes the one you pick — in its original working
 directory, with its original session ID, via the right CLI.
 
 ```
-┌─ ccr — 49 sessions ──────────────────────────────────────────────────────┐
-│ Sessions                    │ Preview                                    │
-│ ▶ rgx                 12m   │ cwd:  /Users/you/project/brevity1swos/rgx  │
-│   fix parser panic on empty │ last: 2026-04-19 14:22  (12m ago)          │
-│   labtalk             1h    │ msgs: 47                                   │
-│   add recipe ingest flow    │ id:   154bd32d-ae8d-41f7-a7b9-...          │
-│   fortune_cookie      3h    │                                            │
-│   tune confetti timing      │ ── recent turns ──                         │
-│                             │ ❯ user                                     │
-│                             │ the panic reproduces only on windows line  │
-│                             │ ◆ asst                                     │
-│                             │ I'll add a test for \r\n then trace the... │
-└─────────────────────────────────────────────────────────────────────────┘
-  ↑↓/jk navigate · Enter resume · / filter · q quit
+┌─ ccr — 23 sessions  (2 possibly live) ───────────────────────────────────┐
+│ Sessions                       │ Preview                                 │
+│ ▶ [claude] api-service    12m  │ tool:    claude                         │
+│     fix null deref in handler  │ cwd:     ~/projects/api-service         │
+│   [claude] web-app     1h ● live │ last:   2026-04-19 14:22  (12m ago)   │
+│     retry on 429s then log     │ msgs:    47                             │
+│   [claude] cli-tool       3d   │ id:      a1b2c3d4-5e6f-7890-abcd-…      │
+│     publish v2 release notes   │                                         │
+│   [claude] docs-site      1w   │ ── recent turns ──                      │
+│     rewrite getting-started    │ ❯ user                                  │
+│                                │ the panic reproduces only on Windows    │
+│                                │ ◆ asst                                  │
+│                                │ I'll add a test for \r\n then trace…    │
+└──────────────────────────────────────────────────────────────────────────┘
+  ↑↓/jk · g/G top/bottom · Enter resume · / filter · ? help · q quit
+```
+
+If a selected session is already running elsewhere (detected via
+`pgrep -f <session-id>`), a confirmation modal appears before spawning a
+second attachment:
+
+```
+        ┌─ Confirm resume ──────────────────────────────────────┐
+        │ ⚠  Session may already be running                     │
+        │                                                       │
+        │ tool:    claude                                       │
+        │ session: a1b2c3d4-5e6f-7890-abcd-…                    │
+        │ cwd:     ~/projects/web-app                           │
+        │                                                       │
+        │ matching processes:                                   │
+        │ 42318 claude --resume a1b2c3d4-5e6f-…                 │
+        │                                                       │
+        │ Resuming may interleave writes and corrupt session.   │
+        │                                                       │
+        │ [y] resume anyway    [n] cancel                       │
+        └───────────────────────────────────────────────────────┘
 ```
 
 ## Install
