@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/brevity1swos/ccr/compare/v0.1.0...v0.1.1) - 2026-04-20
+
+### Added
+
+- ccr restore — move soft-deleted sessions back from trash
+- full-turn content search via searchable blob
+- *(tui)* v opens selected session in agx
+- *(tui)* filter now scans preview turn content
+
+### Fixed
+
+- *(trash)* clippy sort_by_key on newer Rust stable
+
+### Other
+
+- *(scan)* parallelize per-file parsing with rayon
+- *(readme)* center banner, pin CI badge to main branch
+- *(readme)* post-publish polish
+- release v0.1.0 ([#1](https://github.com/brevity1swos/ccr/pull/1))
+
 ## [0.1.0](https://github.com/brevity1swos/ccr/releases/tag/v0.1.0) - 2026-04-20
 
 ### Added
