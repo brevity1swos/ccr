@@ -170,64 +170,6 @@ pub(crate) fn format_json(s: &Session, turns: &[Turn]) -> Result<String> {
     Ok(serde_json::to_string_pretty(&doc)?)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::Local;
-    use std::path::PathBuf;
-
-    fn sample_session() -> Session {
-        Session {
-            backend: "claude",
-            id: "abc-123".into(),
-            cwd: PathBuf::from("/proj"),
-            title: "hi".into(),
-            last_activity: Local::now(),
-            message_count: 2,
-            preview: Vec::new(),
-            possibly_live: false,
-            origin: PathBuf::from("<t>"),
-            searchable: String::new(),
-        }
-    }
-
-    fn sample_turns() -> Vec<Turn> {
-        vec![
-            Turn {
-                role: Role::User,
-                text: "hello".into(),
-            },
-            Turn {
-                role: Role::Assistant,
-                text: "hi back".into(),
-            },
-        ]
-    }
-
-    #[test]
-    fn format_md_has_header_and_turns() {
-        let md = format_md(&sample_session(), &sample_turns());
-        assert!(md.starts_with("# Session `abc-123`"));
-        assert!(md.contains("- **Tool:** claude"));
-        assert!(md.contains("## ❯ user"));
-        assert!(md.contains("hello"));
-        assert!(md.contains("## ◆ assistant"));
-        assert!(md.contains("hi back"));
-    }
-
-    #[test]
-    fn format_json_round_trips() {
-        let s = sample_session();
-        let turns = sample_turns();
-        let json = format_json(&s, &turns).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["id"], "abc-123");
-        assert_eq!(v["backend"], "claude");
-        assert_eq!(v["turns"][0]["role"], "user");
-        assert_eq!(v["turns"][1]["role"], "assistant");
-    }
-}
-
 fn launch_picker() -> Result<()> {
     let backends = all();
     let sessions = scan_all(&backends);
@@ -399,4 +341,62 @@ pub(crate) fn trash_sessions(
         }
     }
     (ok, fail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Local;
+    use std::path::PathBuf;
+
+    fn sample_session() -> Session {
+        Session {
+            backend: "claude",
+            id: "abc-123".into(),
+            cwd: PathBuf::from("/proj"),
+            title: "hi".into(),
+            last_activity: Local::now(),
+            message_count: 2,
+            preview: Vec::new(),
+            possibly_live: false,
+            origin: PathBuf::from("<t>"),
+            searchable: String::new(),
+        }
+    }
+
+    fn sample_turns() -> Vec<Turn> {
+        vec![
+            Turn {
+                role: Role::User,
+                text: "hello".into(),
+            },
+            Turn {
+                role: Role::Assistant,
+                text: "hi back".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn format_md_has_header_and_turns() {
+        let md = format_md(&sample_session(), &sample_turns());
+        assert!(md.starts_with("# Session `abc-123`"));
+        assert!(md.contains("- **Tool:** claude"));
+        assert!(md.contains("## ❯ user"));
+        assert!(md.contains("hello"));
+        assert!(md.contains("## ◆ assistant"));
+        assert!(md.contains("hi back"));
+    }
+
+    #[test]
+    fn format_json_round_trips() {
+        let s = sample_session();
+        let turns = sample_turns();
+        let json = format_json(&s, &turns).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["id"], "abc-123");
+        assert_eq!(v["backend"], "claude");
+        assert_eq!(v["turns"][0]["role"], "user");
+        assert_eq!(v["turns"][1]["role"], "assistant");
+    }
 }
