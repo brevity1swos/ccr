@@ -64,6 +64,8 @@ enum Command {
         #[arg(long, value_enum, default_value_t = ExportFormat::Md)]
         format: ExportFormat,
     },
+    /// Activity overview — totals, per-tool, per-project, per-day histogram.
+    Stats,
 }
 
 fn main() -> Result<()> {
@@ -81,6 +83,7 @@ fn main() -> Result<()> {
         Some(Command::Path { id }) => run_path(&id),
         Some(Command::Show { id }) => run_show(&id),
         Some(Command::Export { id, format }) => run_export(&id, format),
+        Some(Command::Stats) => run_stats(),
     }
 }
 
@@ -144,6 +147,104 @@ pub(crate) fn format_md(s: &Session, turns: &[Turn]) -> String {
         out.push_str("\n\n");
     }
     out
+}
+
+fn run_stats() -> Result<()> {
+    let backends = all();
+    let sessions = scan_all(&backends);
+    print!("{}", format_stats(&sessions));
+    Ok(())
+}
+
+pub(crate) fn format_stats(sessions: &[Session]) -> String {
+    use std::collections::BTreeMap;
+    use std::collections::HashMap;
+
+    let mut out = String::new();
+    let total = sessions.len();
+    let total_turns: usize = sessions.iter().map(|s| s.message_count).sum();
+    let tools: std::collections::BTreeSet<&str> = sessions.iter().map(|s| s.backend).collect();
+
+    out.push_str(&format!(
+        "Total: {total} session{}  ·  {total_turns} turn{}  ·  {} tool{}\n",
+        plural(total),
+        plural(total_turns),
+        tools.len(),
+        plural(tools.len()),
+    ));
+
+    // Per-tool
+    let mut by_tool: HashMap<&str, (usize, usize)> = HashMap::new();
+    for s in sessions {
+        let e = by_tool.entry(s.backend).or_default();
+        e.0 += 1;
+        e.1 += s.message_count;
+    }
+    out.push_str("\nBy tool:\n");
+    let mut tool_rows: Vec<_> = by_tool.iter().collect();
+    tool_rows.sort_by_key(|(_, (count, _))| std::cmp::Reverse(*count));
+    for (tool, (count, turns)) in tool_rows {
+        out.push_str(&format!(
+            "  {tool:<10} {count:>5} session{}  {turns:>7} turn{}\n",
+            plural(*count),
+            plural(*turns)
+        ));
+    }
+
+    // Per-project (top 10)
+    let mut by_project: HashMap<String, usize> = HashMap::new();
+    for s in sessions {
+        let name = s
+            .cwd
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("(unknown)")
+            .to_string();
+        *by_project.entry(name).or_default() += 1;
+    }
+    let mut projects: Vec<_> = by_project.into_iter().collect();
+    projects.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    let top = projects.len().min(10);
+    out.push_str(&format!("\nBy project (top {top}):\n"));
+    for (name, count) in projects.iter().take(top) {
+        out.push_str(&format!(
+            "  {name:<30} {count:>5} session{}\n",
+            plural(*count)
+        ));
+    }
+
+    // Last 30 days histogram
+    let now = chrono::Local::now().date_naive();
+    let mut by_date: BTreeMap<chrono::NaiveDate, usize> = BTreeMap::new();
+    for s in sessions {
+        let d = s.last_activity.date_naive();
+        if (now - d).num_days() < 30 {
+            *by_date.entry(d).or_default() += 1;
+        }
+    }
+    if !by_date.is_empty() {
+        out.push_str("\nActivity (last 30 days):\n");
+        let max = by_date.values().copied().max().unwrap_or(1).max(1);
+        for (date, count) in by_date.iter().rev() {
+            let width = (count * 30 + max / 2) / max; // rounded
+            let bar = "▇".repeat(width.max(1));
+            out.push_str(&format!("  {date}  {bar} {count}\n"));
+        }
+    }
+
+    let live = sessions.iter().filter(|s| s.possibly_live).count();
+    if live > 0 {
+        out.push_str(&format!(
+            "\nPossibly live: {live} session{} (active in last 5 min)\n",
+            plural(live),
+        ));
+    }
+
+    out
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 pub(crate) fn format_json(s: &Session, turns: &[Turn]) -> Result<String> {
@@ -398,5 +499,33 @@ mod tests {
         assert_eq!(v["backend"], "claude");
         assert_eq!(v["turns"][0]["role"], "user");
         assert_eq!(v["turns"][1]["role"], "assistant");
+    }
+
+    #[test]
+    fn format_stats_on_empty_still_prints_zero_row() {
+        let out = format_stats(&[]);
+        assert!(out.starts_with("Total: 0 sessions"));
+    }
+
+    #[test]
+    fn format_stats_groups_by_tool_and_project() {
+        let mut a = sample_session();
+        a.cwd = PathBuf::from("/repos/alpha");
+        a.backend = "claude";
+        a.message_count = 10;
+        let mut b = a.clone();
+        b.id = "def".into();
+        b.backend = "codex";
+        b.cwd = PathBuf::from("/repos/beta");
+        b.message_count = 3;
+
+        let out = format_stats(&[a, b]);
+        assert!(out.contains("Total: 2 sessions"));
+        assert!(out.contains("13 turns"));
+        assert!(out.contains("2 tools"));
+        assert!(out.contains("claude"));
+        assert!(out.contains("codex"));
+        assert!(out.contains("alpha"));
+        assert!(out.contains("beta"));
     }
 }
