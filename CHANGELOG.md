@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/brevity1swos/ccr/compare/v0.1.1...v0.2.0) - 2026-05-23
+
+### Added
+
+- [**breaking**] trim ccr to its core picker — drop trash subsystem, add nicknames
+- ccr stats — totals, per-tool, per-project, 30-day histogram
+- *(export)* ccr export <id> [--format md|json]
+- *(cli)* ccr path + ccr show — Unix-composable primitives
+
+### Fixed
+
+- move #[cfg(test)] mod tests to end of main.rs
+
+### Other
+
+- apply cargo fmt to v0.2.0 surface
+- refresh README + CHANGELOG for the v0.2.0 surface
+
 > **Breaking change.** The soft-delete / prune / restore subsystem has been
 > removed entirely. If you have files in `~/.ccr/trash/` that you still care
 > about, restore them with v0.1.1 before upgrading. Otherwise the directory
