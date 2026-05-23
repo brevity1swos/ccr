@@ -1,0 +1,4 @@
+{"type":"session_meta","timestamp":"2026-05-23T13:00:00Z","payload":{"id":"cdx-9988aabbcc","cwd":"/Users/demo/projects/web-app","timestamp":"2026-05-23T13:00:00Z"}}
+{"type":"response_item","timestamp":"2026-05-23T13:00:05Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"the upstream keeps returning 429 on the search endpoint"}]}}
+{"type":"response_item","timestamp":"2026-05-23T13:00:30Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Let me add a retry-with-backoff wrapper and log each retry attempt."}]}}
+{"type":"response_item","timestamp":"2026-05-23T13:05:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"use exponential backoff capped at 30s and add jitter"}]}}

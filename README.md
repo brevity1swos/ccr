@@ -16,6 +16,10 @@
   <strong>Supported:</strong> Claude Code · Codex · Gemini CLI
 </p>
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/brevity1swos/ccr/main/assets/demo.gif" alt="ccr demo — multi-tool session picker, nickname, filter" width="100%">
+</p>
+
 ## What it does
 
 Scans each supported tool's session store, shows every session in a TUI ranked

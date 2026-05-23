@@ -1,0 +1,10 @@
+{
+  "sessionId": "gem-7777eeff",
+  "startTime": "2026-05-20T09:55:00Z",
+  "lastUpdated": "2026-05-20T10:00:00Z",
+  "messages": [
+    {"id": "m1", "timestamp": "2026-05-20T09:55:00Z", "type": "user", "content": [{"text": "draft release notes for v2"}]},
+    {"id": "m2", "timestamp": "2026-05-20T09:56:00Z", "type": "gemini", "content": [{"text": "Here is a draft covering the breaking changes, new features, and migration steps."}]},
+    {"id": "m3", "timestamp": "2026-05-20T10:00:00Z", "type": "user", "content": [{"text": "update the migration guide section with examples"}]}
+  ]
+}
