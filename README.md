@@ -22,27 +22,38 @@
 
 ## What it does
 
-Scans each supported tool's session store, shows every session in a TUI ranked
-by last activity, and resumes the one you pick — in its original working
-directory, with its original session ID, via the right CLI.
+Scans every supported tool's session store, ranks each session by last
+activity, and resumes the one you pick — in its original working directory,
+with its original session ID, via the right CLI.
+
+Each row's subtitle is the **last** user message in that session, so you see
+what you were working on most recently — not how the chat opened. Press `n`
+on any row to add a yellow nickname; nicknamed rows expand to a third line
+that keeps the auto-derived title visible (dim) for context, and the
+nickname is searched by `/` too.
 
 ```
 ┌─ ccr — 211 sessions  (2 possibly live) ──────────────────────────────────┐
-│ Sessions                       │ Preview                                 │
-│ ▶ [claude] api-service    12m  │ tool:    claude                         │
-│     fix null deref in handler  │ cwd:     ~/projects/api-service         │
-│   [codex] web-app      1h ● live │ last:   2026-04-19 14:22  (12m ago)   │
-│     retry on 429s then log     │ msgs:    47                             │
-│   [gemini] cli-tool       3d   │ id:      a1b2c3d4-5e6f-7890-abcd-…      │
-│     publish v2 release notes   │                                         │
-│   [claude] docs-site      1w   │ ── recent turns ──                      │
-│     rewrite getting-started    │ ❯ user                                  │
-│                                │ the panic reproduces only on Windows    │
-│                                │ ◆ asst                                  │
-│                                │ I'll add a test for \r\n then trace…    │
+│ Sessions                              │ Preview                          │
+│ ▶ [claude] api-service        12m ago │ nick:    panic hotfix            │
+│     panic hotfix                      │ tool:    claude                  │
+│     actually let's also add a regr…   │ cwd:     ~/projects/api-service  │
+│   [codex]  web-app         1h ● live  │ last:    2026-05-23 14:00  (12m) │
+│     use exponential backoff capped…   │ msgs:    47                      │
+│   [gemini] cli-tool             3d    │ id:      a1b2c3d4-5e6f-…         │
+│     update the migration guide se…    │                                  │
+│   [claude] docs-site            1w    │ ── recent turns ──               │
+│     tighten the intro paragraph a…    │ ❯ user                           │
+│                                       │ the panic reproduces only when…  │
+│                                       │ ◆ asst                           │
+│                                       │ Let me add a None check in the…  │
 └──────────────────────────────────────────────────────────────────────────┘
   ↑↓/jk · Enter resume · b bookmark · n nickname · / filter · ? help · q
 ```
+
+Top row is **nicknamed** — `panic hotfix` shows in yellow, the auto-derived
+last-message title stays visible underneath in dim gray. Rows without a
+nickname are two lines (tags + auto-title), the same as before.
 
 If a selected session is already running elsewhere (detected via
 `pgrep -f <session-id>`), a confirmation modal appears before spawning a

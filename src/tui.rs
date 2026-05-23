@@ -381,16 +381,28 @@ fn render_list(
                         .add_modifier(Modifier::BOLD),
                 ));
             }
-            // Nickname replaces the generated title when set.
-            let (subtitle_text, subtitle_style) = if let Some(nick) = nicknames.get(&s.id) {
-                (format!("  {nick}"), Style::default().fg(Color::Yellow))
+            // Nicknamed rows are 3 lines: tags, yellow nickname, then the
+            // auto-derived last-message title (dim) for context.
+            // Unnicknamed rows are 2 lines: tags + title (white).
+            let mut lines = vec![Line::from(spans)];
+            if let Some(nick) = nicknames.get(&s.id) {
+                lines.push(Line::from(Span::styled(
+                    format!("  {nick}"),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", s.title),
+                    Style::default().fg(Color::DarkGray),
+                )));
             } else {
-                (format!("  {}", s.title), Style::default().fg(Color::White))
-            };
-            ListItem::new(vec![
-                Line::from(spans),
-                Line::from(Span::styled(subtitle_text, subtitle_style)),
-            ])
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", s.title),
+                    Style::default().fg(Color::White),
+                )));
+            }
+            ListItem::new(lines)
         })
         .collect();
 
