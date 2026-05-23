@@ -9,7 +9,7 @@ use std::process::Command;
 use rayon::prelude::*;
 
 use crate::backends::Backend;
-use crate::session::{append_searchable, Role, Session, Turn, PREVIEW_TURNS, TITLE_MAX};
+use crate::session::{PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn, append_searchable};
 use crate::util::{is_possibly_live, truncate};
 
 pub struct GeminiBackend;

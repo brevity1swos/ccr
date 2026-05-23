@@ -40,15 +40,9 @@ pub enum AppAction {
 enum Mode {
     List,
     Filter,
-    Confirm {
-        session: Session,
-        pids: Vec<String>,
-    },
+    Confirm { session: Session, pids: Vec<String> },
     Help,
-    NicknameInput {
-        session_id: String,
-        buf: String,
-    },
+    NicknameInput { session_id: String, buf: String },
 }
 
 struct TerminalGuard;
@@ -56,7 +50,12 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, ShowCursor);
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            ShowCursor
+        );
     }
 }
 
@@ -92,7 +91,17 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
             _ => {}
         }
 
-        terminal.draw(|f| ui(f, &visible, &mut state, &filter, &mode, &bookmarked, &nicknames))?;
+        terminal.draw(|f| {
+            ui(
+                f,
+                &visible,
+                &mut state,
+                &filter,
+                &mode,
+                &bookmarked,
+                &nicknames,
+            )
+        })?;
 
         let Event::Key(key) = event::read()? else {
             continue;
@@ -140,11 +149,17 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
                     }
                     KeyCode::Backspace => {
                         next_buf.pop();
-                        mode = Mode::NicknameInput { session_id: id, buf: next_buf };
+                        mode = Mode::NicknameInput {
+                            session_id: id,
+                            buf: next_buf,
+                        };
                     }
                     KeyCode::Char(c) => {
                         next_buf.push(c);
-                        mode = Mode::NicknameInput { session_id: id, buf: next_buf };
+                        mode = Mode::NicknameInput {
+                            session_id: id,
+                            buf: next_buf,
+                        };
                     }
                     _ => {}
                 }
@@ -315,9 +330,7 @@ fn ui(
     match mode {
         Mode::Confirm { session, pids } => render_confirm(f, size, session, pids),
         Mode::Help => render_help(f, size),
-        Mode::NicknameInput { session_id, buf } => {
-            render_nickname_input(f, size, session_id, buf)
-        }
+        Mode::NicknameInput { session_id, buf } => render_nickname_input(f, size, session_id, buf),
         Mode::List | Mode::Filter => {}
     }
 }
@@ -336,7 +349,11 @@ fn render_list(
             let project = project_basename(&s.cwd);
             let rel = relative_time(s.last_activity);
             let mut spans = vec![Span::styled(
-                if bookmarked.contains(&s.id) { "★ " } else { "  " },
+                if bookmarked.contains(&s.id) {
+                    "★ "
+                } else {
+                    "  "
+                },
                 Style::default().fg(Color::Yellow),
             )];
             spans.extend([
@@ -350,14 +367,18 @@ fn render_list(
                         truncate(&project, PROJECT_COL_WIDTH),
                         w = PROJECT_COL_WIDTH
                     ),
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("  {rel}"), Style::default().fg(Color::DarkGray)),
             ]);
             if s.possibly_live {
                 spans.push(Span::styled(
                     "  ● live",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
             // Nickname replaces the generated title when set.
@@ -405,7 +426,9 @@ fn render_preview(
             dim("nick:   "),
             Span::styled(
                 nick.clone(),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]));
     }
@@ -551,7 +574,9 @@ fn render_nickname_input(f: &mut Frame, area: Rect, session_id: &str, buf: &str)
             dim("  name:  "),
             Span::styled(
                 format!("{buf}_"),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(""),
@@ -607,8 +632,14 @@ fn render_help(f: &mut Frame, area: Rect) {
         section("Actions"),
         k("Enter", "resume selected session (with live-check)"),
         k("v", "view session turns in agx (requires `agx` on PATH)"),
-        k("b", "toggle bookmark (★ marker, persists in ~/.ccr/bookmarks.json)"),
-        k("n", "set nickname — shown in yellow instead of last message"),
+        k(
+            "b",
+            "toggle bookmark (★ marker, persists in ~/.ccr/bookmarks.json)",
+        ),
+        k(
+            "n",
+            "set nickname — shown in yellow instead of last message",
+        ),
         k("/", "filter: title, cwd, tool, nickname, or content"),
         k("? / F1", "this help"),
         k("q / Esc", "quit"),
@@ -661,7 +692,11 @@ mod tests {
 
     #[test]
     fn empty_filter_matches_everything() {
-        assert!(matches_filter(&sess("hello", "/x", "claude"), "", &no_nicknames()));
+        assert!(matches_filter(
+            &sess("hello", "/x", "claude"),
+            "",
+            &no_nicknames()
+        ));
     }
 
     #[test]
@@ -689,12 +724,20 @@ mod tests {
 
     #[test]
     fn filter_matches_backend_tag() {
-        assert!(matches_filter(&sess("x", "/y", "claude"), "claud", &no_nicknames()));
+        assert!(matches_filter(
+            &sess("x", "/y", "claude"),
+            "claud",
+            &no_nicknames()
+        ));
     }
 
     #[test]
     fn filter_rejects_no_match() {
-        assert!(!matches_filter(&sess("hello", "/y", "claude"), "xyz", &no_nicknames()));
+        assert!(!matches_filter(
+            &sess("hello", "/y", "claude"),
+            "xyz",
+            &no_nicknames()
+        ));
     }
 
     #[test]

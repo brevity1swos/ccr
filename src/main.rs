@@ -317,8 +317,14 @@ mod tests {
 
     fn sample_turns() -> Vec<Turn> {
         vec![
-            Turn { role: Role::User, text: "hello".into() },
-            Turn { role: Role::Assistant, text: "hi back".into() },
+            Turn {
+                role: Role::User,
+                text: "hello".into(),
+            },
+            Turn {
+                role: Role::Assistant,
+                text: "hi back".into(),
+            },
         ]
     }
 
