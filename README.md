@@ -37,7 +37,7 @@ directory, with its original session ID, via the right CLI.
 │                                │ ◆ asst                                  │
 │                                │ I'll add a test for \r\n then trace…    │
 └──────────────────────────────────────────────────────────────────────────┘
-  ↑↓/jk · g/G top/bottom · Enter resume · d delete · D prune · / filter · ? help · q
+  ↑↓/jk · Enter resume · b bookmark · n nickname · / filter · ? help · q
 ```
 
 If a selected session is already running elsewhere (detected via
@@ -86,9 +86,11 @@ ccr
 | `g` / `Home`| jump to top                             |
 | `G` / `End` | jump to bottom                          |
 | `PgUp/Dn`   | page up/down (10 rows)                  |
-| `/`         | filter: title, cwd, tool, or preview content |
+| `/`         | filter: title, cwd, tool, nickname, or content |
 | `Enter`     | resume selected session (live-checked)  |
 | `v`         | open session in [agx] (timeline viewer) |
+| `b`         | toggle bookmark (★ marker, persisted)   |
+| `n`         | set / edit / clear session nickname (yellow label) |
 | `?` / `F1`  | help overlay                            |
 | `q` / `Esc` | quit                                    |
 
@@ -99,35 +101,30 @@ found, a confirmation modal warns before spawning a second attachment (which
 would interleave JSONL writes and corrupt the session). Otherwise it execs the
 tool's resume command with the session's original `cwd`.
 
-## Management
+## CLI subcommands
 
-| Key / Command              | Action                                                 |
-|----------------------------|--------------------------------------------------------|
-| `d`                        | soft-delete selected session (confirm modal)           |
-| `D`                        | prune-by-age modal — default `90d`, accepts `Nd/Nw/Nmo/Ny` |
-| `ccr prune --older-than N` | non-interactive bulk trash; `--dry-run` to preview     |
-| `ccr restore`              | interactive picker over trashed sessions (moves back)  |
-| `ccr restore <id>`         | non-interactive restore by session id                  |
-| `ccr list`                 | plain-text dump of all sessions (tool id date title)   |
-| `ccr path <id>`            | absolute path to session file (pipes well)             |
-| `ccr show <id>`            | raw file contents (same as `cat $(ccr path <id>)`)     |
-| `ccr export <id>`          | full-turn markdown dump (or `--format json`)           |
-| `ccr stats`                | totals, per-tool, per-project, 30-day activity histogram |
+| Command              | Action                                                 |
+|----------------------|--------------------------------------------------------|
+| `ccr list`           | plain-text dump of all sessions (tool id date title)   |
+| `ccr path <id>`      | absolute path to session file (pipes well)             |
+| `ccr show <id>`      | raw file contents (same as `cat $(ccr path <id>)`)     |
+| `ccr export <id>`    | full-turn markdown dump (or `--format json`)           |
+| `ccr stats`          | totals, per-tool, per-project, 30-day activity histogram |
 
-Soft-deletes go to `~/.ccr/trash/<tool>/<id>.jsonl` with a sidecar
-`<id>.meta.json` recording the original path. `ccr restore` reads the
-sidecar and moves the file back. Anything untouched for 30 days is
-hard-pruned automatically on next launch.
+`ccr` never modifies your session files. If you want to delete one, delete
+it where its tool stored it (`~/.claude/projects/...`, `~/.codex/sessions/...`,
+or `~/.gemini/tmp/...`).
 
 ## Environment variables
 
-| Variable            | Purpose                                                    |
-|---------------------|------------------------------------------------------------|
-| `CCR_CLAUDE_DIR`    | Full path to Claude's `projects/` dir                      |
-| `CLAUDE_CONFIG_DIR` | Claude Code's native override; `ccr` appends `projects`    |
-| `CCR_CODEX_DIR`     | Full path to Codex's `sessions/` dir                       |
-| `CCR_GEMINI_DIR`    | Full path to Gemini's `~/.gemini` root                     |
-| `CCR_TRASH_DIR`     | Override the `~/.ccr/trash/` destination                   |
+| Variable              | Purpose                                                    |
+|-----------------------|------------------------------------------------------------|
+| `CCR_CLAUDE_DIR`      | Full path to Claude's `projects/` dir                      |
+| `CLAUDE_CONFIG_DIR`   | Claude Code's native override; `ccr` appends `projects`    |
+| `CCR_CODEX_DIR`       | Full path to Codex's `sessions/` dir                       |
+| `CCR_GEMINI_DIR`      | Full path to Gemini's `~/.gemini` root                     |
+| `CCR_BOOKMARKS_FILE`  | Override the `~/.ccr/bookmarks.json` location              |
+| `CCR_NICKNAMES_FILE`  | Override the `~/.ccr/nicknames.json` location              |
 
 ## How it works
 
@@ -142,13 +139,15 @@ Each backend knows where its tool stores sessions and how to resume one.
 For each session `ccr` extracts:
 
 - `cwd` — working directory the session was started in
-- title — first user message, truncated to 80 chars
+- title — **last** user message in the session, truncated to 80 chars (so the
+  list shows what you were working on most recently, not how the chat opened)
 - `last_activity` — most recent turn timestamp (drives the sort and the `● live` flag)
 - `message_count` — user + assistant turns only
 - `preview` — last 6 turns, rendered in the right pane
 
-Read-only at rest; the only writes `ccr` ever performs are moving your own
-session files into `~/.ccr/trash/` when you press `d` or `D`.
+Read-only at rest. `ccr` never touches your session files. The only state it
+writes is `~/.ccr/bookmarks.json` (when you press `b`) and
+`~/.ccr/nicknames.json` (when you press `n`). Both are plain JSON.
 
 ## Adding a backend
 
@@ -159,10 +158,10 @@ pub trait Backend: Send + Sync {
     fn name(&self) -> &'static str;
     fn scan(&self) -> Result<Vec<Session>>;
     fn resume(&self, s: &Session) -> std::process::Command;
+    fn all_turns(&self, s: &Session) -> Result<Vec<Turn>>;  // for ccr export
 
-    // Optional overrides with useful defaults:
+    // Optional override with a useful default:
     fn running(&self, s: &Session) -> Vec<String>;   // default: pgrep -f <id>
-    fn trash(&self, s: &Session) -> Result<()>;      // default: move session.origin
 }
 ```
 
