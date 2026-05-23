@@ -1,15 +1,14 @@
 use anyhow::{Context, Result};
-use chrono::Local;
 use clap::{Parser, Subcommand};
 
-mod age;
 mod backends;
+mod bookmarks;
+mod nicknames;
 mod session;
-mod trash;
 mod tui;
 mod util;
 
-use backends::{Backend, all, by_name, scan_all};
+use backends::{all, by_name, scan_all};
 use session::{Role, Session, Turn};
 use tui::{AppAction, run};
 use util::truncate;
@@ -29,22 +28,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Move sessions older than a given age to the ccr trash directory.
-    Prune {
-        /// Age threshold. Accepts Nd, Nw, Nmo, Ny, or a bare number (days).
-        #[arg(long, value_name = "AGE")]
-        older_than: String,
-        /// Show what would be pruned without moving anything.
-        #[arg(long)]
-        dry_run: bool,
-    },
     /// List all sessions as plain text (tool id date title).
     List,
-    /// Restore a previously soft-deleted session from ~/.ccr/trash/.
-    Restore {
-        /// Session id to restore. Omit for interactive numeric prompt.
-        id: Option<String>,
-    },
     /// Print the absolute path to a session's on-disk file.
     /// Useful in shell pipelines: `cat $(ccr path <id>)`.
     Path {
@@ -70,16 +55,9 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let _ = trash::auto_prune();
-
     match cli.command {
         None => launch_picker(),
-        Some(Command::Prune {
-            older_than,
-            dry_run,
-        }) => run_prune(&older_than, dry_run),
         Some(Command::List) => run_list(),
-        Some(Command::Restore { id }) => run_restore(id.as_deref()),
         Some(Command::Path { id }) => run_path(&id),
         Some(Command::Show { id }) => run_show(&id),
         Some(Command::Export { id, format }) => run_export(&id, format),
@@ -173,7 +151,6 @@ pub(crate) fn format_stats(sessions: &[Session]) -> String {
         plural(tools.len()),
     ));
 
-    // Per-tool
     let mut by_tool: HashMap<&str, (usize, usize)> = HashMap::new();
     for s in sessions {
         let e = by_tool.entry(s.backend).or_default();
@@ -191,7 +168,6 @@ pub(crate) fn format_stats(sessions: &[Session]) -> String {
         ));
     }
 
-    // Per-project (top 10)
     let mut by_project: HashMap<String, usize> = HashMap::new();
     for s in sessions {
         let name = s
@@ -213,7 +189,6 @@ pub(crate) fn format_stats(sessions: &[Session]) -> String {
         ));
     }
 
-    // Last 30 days histogram
     let now = chrono::Local::now().date_naive();
     let mut by_date: BTreeMap<chrono::NaiveDate, usize> = BTreeMap::new();
     for s in sessions {
@@ -226,7 +201,7 @@ pub(crate) fn format_stats(sessions: &[Session]) -> String {
         out.push_str("\nActivity (last 30 days):\n");
         let max = by_date.values().copied().max().unwrap_or(1).max(1);
         for (date, count) in by_date.iter().rev() {
-            let width = (count * 30 + max / 2) / max; // rounded
+            let width = (count * 30 + max / 2) / max;
             let bar = "▇".repeat(width.max(1));
             out.push_str(&format!("  {date}  {bar} {count}\n"));
         }
@@ -319,131 +294,6 @@ fn run_list() -> Result<()> {
     Ok(())
 }
 
-fn run_prune(age_str: &str, dry_run: bool) -> Result<()> {
-    let Some(age) = age::parse_age(age_str) else {
-        anyhow::bail!("invalid --older-than `{age_str}` (use forms like 30d, 2w, 3mo, 1y)")
-    };
-    let threshold = Local::now() - age;
-    let backends = all();
-    let sessions = scan_all(&backends);
-    let stale: Vec<Session> = sessions
-        .into_iter()
-        .filter(|s| s.last_activity < threshold)
-        .collect();
-
-    if stale.is_empty() {
-        println!("ccr: no sessions older than {age_str}");
-        return Ok(());
-    }
-
-    println!("{} session(s) older than {age_str}:", stale.len());
-    for s in &stale {
-        println!(
-            "  [{}] {}  {}  {}",
-            s.backend,
-            s.id,
-            s.last_activity.format("%Y-%m-%d"),
-            truncate(&s.title, 60)
-        );
-    }
-
-    if dry_run {
-        println!("(dry-run — nothing moved)");
-        return Ok(());
-    }
-
-    let (ok, fail) = trash_sessions(&backends, &stale);
-    let dest = trash::trash_root()?;
-    println!("moved {ok} session(s) to {}", dest.display());
-    if fail > 0 {
-        eprintln!("{fail} failed — see stderr above");
-    }
-    Ok(())
-}
-
-fn run_restore(id: Option<&str>) -> Result<()> {
-    let items = trash::list_trashed()?;
-    if items.is_empty() {
-        println!("ccr: trash is empty");
-        return Ok(());
-    }
-
-    if let Some(needle) = id {
-        let item = items
-            .iter()
-            .find(|i| i.id == needle)
-            .with_context(|| format!("no trashed session with id `{needle}`"))?;
-        trash::restore(item)?;
-        println!(
-            "restored [{}] {} → {}",
-            item.backend,
-            item.id,
-            item.origin.display()
-        );
-        return Ok(());
-    }
-
-    println!("Trashed sessions:\n");
-    for (i, item) in items.iter().enumerate() {
-        let age = chrono::DateTime::<chrono::Local>::from(item.trashed_at).format("%Y-%m-%d %H:%M");
-        println!(
-            "  {:>3}. [{}] {}  trashed {}  → {}",
-            i + 1,
-            item.backend,
-            item.id,
-            age,
-            item.origin.display()
-        );
-    }
-    print!("\nRestore # (q to cancel): ");
-    use std::io::Write;
-    std::io::stdout().flush()?;
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    let line = line.trim();
-    if line.is_empty() || line == "q" {
-        println!("cancelled");
-        return Ok(());
-    }
-    let n: usize = line
-        .parse()
-        .with_context(|| format!("invalid number: {line}"))?;
-    let item = items
-        .get(n.saturating_sub(1))
-        .with_context(|| format!("out of range: {n}"))?;
-    trash::restore(item)?;
-    println!(
-        "restored [{}] {} → {}",
-        item.backend,
-        item.id,
-        item.origin.display()
-    );
-    Ok(())
-}
-
-pub(crate) fn trash_sessions(
-    backends: &[Box<dyn Backend>],
-    sessions: &[Session],
-) -> (usize, usize) {
-    let mut ok = 0;
-    let mut fail = 0;
-    for s in sessions {
-        let Some(backend) = by_name(backends, s.backend) else {
-            eprintln!("ccr: no backend for `{}`", s.backend);
-            fail += 1;
-            continue;
-        };
-        match backend.trash(s) {
-            Ok(()) => ok += 1,
-            Err(e) => {
-                eprintln!("ccr: trash failed for {}: {e}", s.id);
-                fail += 1;
-            }
-        }
-    }
-    (ok, fail)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,14 +317,8 @@ mod tests {
 
     fn sample_turns() -> Vec<Turn> {
         vec![
-            Turn {
-                role: Role::User,
-                text: "hello".into(),
-            },
-            Turn {
-                role: Role::Assistant,
-                text: "hi back".into(),
-            },
+            Turn { role: Role::User, text: "hello".into() },
+            Turn { role: Role::Assistant, text: "hi back".into() },
         ]
     }
 

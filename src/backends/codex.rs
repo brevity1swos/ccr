@@ -167,7 +167,7 @@ pub(crate) fn parse_session_from_reader(
                     continue;
                 }
                 message_count += 1;
-                if role == Role::User && title.is_none() {
+                if role == Role::User {
                     title = Some(truncate(&text, TITLE_MAX));
                 }
                 append_searchable(&mut searchable, &text);

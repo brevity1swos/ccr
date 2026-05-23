@@ -9,7 +9,7 @@ use std::process::Command;
 use rayon::prelude::*;
 
 use crate::backends::Backend;
-use crate::session::{PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn, append_searchable};
+use crate::session::{append_searchable, Role, Session, Turn, PREVIEW_TURNS, TITLE_MAX};
 use crate::util::{is_possibly_live, truncate};
 
 pub struct GeminiBackend;
@@ -98,13 +98,15 @@ impl Backend for GeminiBackend {
         // Gemini's `--resume <N>` takes a 1-based project-scoped index, not a
         // session UUID. We look up the index at resume time by grepping for
         // `[<uuid>]` in `gemini --list-sessions` output.
+        //
+        // The session ID is passed as $1 (positional arg) rather than interpolated
+        // into the script string, so shell metacharacters in the ID are inert.
         let mut cmd = Command::new("sh");
-        let script = format!(
-            "N=$(gemini --list-sessions 2>/dev/null | grep -F '[{id}]' | sed -E 's/^ *([0-9]+)\\..*/\\1/' | head -1); \
-             if [ -n \"$N\" ]; then exec gemini --resume \"$N\"; else echo 'ccr: gemini session not found for this project' >&2; exit 1; fi",
-            id = s.id
-        );
-        cmd.arg("-c").arg(script).current_dir(&s.cwd);
+        let script = "N=$(gemini --list-sessions 2>/dev/null | grep -F \"[$1]\" | \
+                      sed -E 's/^ *([0-9]+)\\..*/\\1/' | head -1); \
+                      if [ -n \"$N\" ]; then exec gemini --resume \"$N\"; \
+                      else echo 'ccr: gemini session not found for this project' >&2; exit 1; fi";
+        cmd.args(["-c", script, "--", &s.id]).current_dir(&s.cwd);
         cmd
     }
 
@@ -196,7 +198,7 @@ pub(crate) fn parse_session_from_json(
             continue;
         }
         message_count += 1;
-        if role == Role::User && title.is_none() {
+        if role == Role::User {
             title = Some(truncate(&text, TITLE_MAX));
         }
         append_searchable(&mut searchable, &text);

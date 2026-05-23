@@ -170,7 +170,7 @@ pub(crate) fn parse_session_from_reader(
             continue;
         }
         message_count += 1;
-        if role == Role::User && title.is_none() {
+        if role == Role::User {
             title = Some(truncate(&text, TITLE_MAX));
         }
         append_searchable(&mut searchable, &text);
@@ -209,19 +209,21 @@ mod tests {
     }
 
     #[test]
-    fn first_user_message_becomes_title() {
+    fn last_user_message_becomes_title() {
         let jsonl = r#"{"type":"user","cwd":"/home/me/proj","timestamp":"2026-04-19T10:00:00Z","message":{"content":"hello world"}}
 {"type":"assistant","timestamp":"2026-04-19T10:00:01Z","message":{"content":"hi back"}}
+{"type":"user","cwd":"/home/me/proj","timestamp":"2026-04-19T10:00:02Z","message":{"content":"follow up question"}}
 "#;
         let s = parse(jsonl);
         assert_eq!(s.id, "abc-123");
         assert_eq!(s.backend, "claude");
         assert_eq!(s.cwd, PathBuf::from("/home/me/proj"));
-        assert_eq!(s.title, "hello world");
-        assert_eq!(s.message_count, 2);
-        assert_eq!(s.preview.len(), 2);
+        assert_eq!(s.title, "follow up question");
+        assert_eq!(s.message_count, 3);
+        assert_eq!(s.preview.len(), 3);
         assert_eq!(s.preview[0].role, Role::User);
         assert_eq!(s.preview[1].role, Role::Assistant);
+        assert_eq!(s.preview[2].role, Role::User);
     }
 
     #[test]

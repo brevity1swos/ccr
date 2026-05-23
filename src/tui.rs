@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossterm::{
+    cursor::Show as ShowCursor,
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -12,12 +13,12 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
+use std::collections::{HashMap, HashSet};
 use std::io;
 
-use chrono::Local;
-
-use crate::age::parse_age;
 use crate::backends::{Backend, by_name};
+use crate::bookmarks;
+use crate::nicknames;
 use crate::session::{Role, Session};
 use crate::util::{project_basename, relative_time, truncate};
 
@@ -44,25 +45,28 @@ enum Mode {
         pids: Vec<String>,
     },
     Help,
-    DeleteConfirm {
-        session: Session,
-    },
-    PruneInput {
+    NicknameInput {
+        session_id: String,
         buf: String,
-        error: Option<String>,
-    },
-    PruneConfirm {
-        age_str: String,
-        matching: Vec<Session>,
     },
 }
 
-pub fn run(mut sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppAction> {
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, ShowCursor);
+    }
+}
+
+pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppAction> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    let _guard = TerminalGuard;
 
     let mut state = ListState::default();
     if !sessions.is_empty() {
@@ -70,11 +74,13 @@ pub fn run(mut sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<
     }
     let mut filter = String::new();
     let mut mode = Mode::List;
+    let mut bookmarked: HashSet<String> = bookmarks::load();
+    let mut nicknames: HashMap<String, String> = nicknames::load();
 
     let result = loop {
         let visible: Vec<&Session> = sessions
             .iter()
-            .filter(|s| matches_filter(s, &filter))
+            .filter(|s| matches_filter(s, &filter, &nicknames))
             .collect();
         match state.selected() {
             Some(sel) if sel >= visible.len() => state.select(if visible.is_empty() {
@@ -86,7 +92,7 @@ pub fn run(mut sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<
             _ => {}
         }
 
-        terminal.draw(|f| ui(f, &visible, &mut state, &filter, &mode))?;
+        terminal.draw(|f| ui(f, &visible, &mut state, &filter, &mode, &bookmarked, &nicknames))?;
 
         let Event::Key(key) = event::read()? else {
             continue;
@@ -123,6 +129,26 @@ pub fn run(mut sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => mode = Mode::List,
                 _ => {}
             },
+            Mode::NicknameInput { session_id, buf } => {
+                let id = session_id.clone();
+                let mut next_buf = buf.clone();
+                match key.code {
+                    KeyCode::Esc => mode = Mode::List,
+                    KeyCode::Enter => {
+                        let _ = nicknames::set(&mut nicknames, &id, &next_buf);
+                        mode = Mode::List;
+                    }
+                    KeyCode::Backspace => {
+                        next_buf.pop();
+                        mode = Mode::NicknameInput { session_id: id, buf: next_buf };
+                    }
+                    KeyCode::Char(c) => {
+                        next_buf.push(c);
+                        mode = Mode::NicknameInput { session_id: id, buf: next_buf };
+                    }
+                    _ => {}
+                }
+            }
             Mode::List => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => break AppAction::Quit,
                 KeyCode::Char('/') => {
@@ -140,20 +166,23 @@ pub fn run(mut sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<
                 KeyCode::End | KeyCode::Char('G') if !visible.is_empty() => {
                     state.select(Some(visible.len() - 1));
                 }
-                KeyCode::Char('d') => {
+                KeyCode::Char('b') | KeyCode::Char('B') => {
                     if let Some(sel) = state.selected()
                         && let Some(s) = visible.get(sel)
                     {
-                        mode = Mode::DeleteConfirm {
-                            session: (*s).clone(),
-                        };
+                        let _ = bookmarks::toggle(&mut bookmarked, &s.id);
                     }
                 }
-                KeyCode::Char('D') => {
-                    mode = Mode::PruneInput {
-                        buf: "90d".into(),
-                        error: None,
-                    };
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    if let Some(sel) = state.selected()
+                        && let Some(s) = visible.get(sel)
+                    {
+                        let existing = nicknames.get(&s.id).cloned().unwrap_or_default();
+                        mode = Mode::NicknameInput {
+                            session_id: s.id.clone(),
+                            buf: existing,
+                        };
+                    }
                 }
                 KeyCode::Char('v') | KeyCode::Char('V') => {
                     if let Some(sel) = state.selected()
@@ -180,89 +209,13 @@ pub fn run(mut sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<
                 }
                 _ => {}
             },
-            Mode::DeleteConfirm { session } => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    let sess = session.clone();
-                    if let Some(b) = by_name(backends, sess.backend)
-                        && b.trash(&sess).is_ok()
-                    {
-                        sessions.retain(|s| !(s.id == sess.id && s.backend == sess.backend));
-                    }
-                    mode = Mode::List;
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => mode = Mode::List,
-                _ => {}
-            },
-            Mode::PruneInput { buf, error: _ } => {
-                let mut next_buf = buf.clone();
-                match key.code {
-                    KeyCode::Esc => mode = Mode::List,
-                    KeyCode::Char(c) => {
-                        next_buf.push(c);
-                        mode = Mode::PruneInput {
-                            buf: next_buf,
-                            error: None,
-                        };
-                    }
-                    KeyCode::Backspace => {
-                        next_buf.pop();
-                        mode = Mode::PruneInput {
-                            buf: next_buf,
-                            error: None,
-                        };
-                    }
-                    KeyCode::Enter => match parse_age(&next_buf) {
-                        Some(dur) => {
-                            let threshold = Local::now() - dur;
-                            let matching: Vec<Session> = sessions
-                                .iter()
-                                .filter(|s| s.last_activity < threshold)
-                                .cloned()
-                                .collect();
-                            mode = Mode::PruneConfirm {
-                                age_str: next_buf,
-                                matching,
-                            };
-                        }
-                        None => {
-                            mode = Mode::PruneInput {
-                                buf: next_buf,
-                                error: Some("use forms like 30d, 2w, 3mo, 1y".into()),
-                            };
-                        }
-                    },
-                    _ => {}
-                }
-            }
-            Mode::PruneConfirm { matching, .. } => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    let to_trash = matching.clone();
-                    for s in &to_trash {
-                        if let Some(b) = by_name(backends, s.backend)
-                            && b.trash(s).is_ok()
-                        {
-                            sessions.retain(|x| !(x.id == s.id && x.backend == s.backend));
-                        }
-                    }
-                    mode = Mode::List;
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => mode = Mode::List,
-                _ => {}
-            },
         }
     };
 
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
     Ok(result)
 }
 
-fn matches_filter(s: &Session, filter: &str) -> bool {
+fn matches_filter(s: &Session, filter: &str, nicknames: &HashMap<String, String>) -> bool {
     if filter.is_empty() {
         return true;
     }
@@ -271,6 +224,10 @@ fn matches_filter(s: &Session, filter: &str) -> bool {
         || s.cwd.to_string_lossy().to_lowercase().contains(&needle)
         || s.backend.to_lowercase().contains(&needle)
         || s.searchable.contains(&needle)
+        || nicknames
+            .get(&s.id)
+            .map(|n| n.to_lowercase().contains(&needle))
+            .unwrap_or(false)
 }
 
 fn move_sel(state: &mut ListState, visible: &[&Session], delta: i32) {
@@ -282,7 +239,15 @@ fn move_sel(state: &mut ListState, visible: &[&Session], delta: i32) {
     state.select(Some(new as usize));
 }
 
-fn ui(f: &mut Frame, sessions: &[&Session], state: &mut ListState, filter: &str, mode: &Mode) {
+fn ui(
+    f: &mut Frame,
+    sessions: &[&Session],
+    state: &mut ListState,
+    filter: &str,
+    mode: &Mode,
+    bookmarked: &HashSet<String>,
+    nicknames: &HashMap<String, String>,
+) {
     let size = f.area();
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -323,8 +288,8 @@ fn ui(f: &mut Frame, sessions: &[&Session], state: &mut ListState, filter: &str,
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(outer[1]);
 
-    render_list(f, columns[0], sessions, state);
-    render_preview(f, columns[1], sessions, state);
+    render_list(f, columns[0], sessions, state, bookmarked, nicknames);
+    render_preview(f, columns[1], sessions, state, nicknames);
 
     let footer = match mode {
         Mode::Filter => Span::styled(
@@ -335,17 +300,13 @@ fn ui(f: &mut Frame, sessions: &[&Session], state: &mut ListState, filter: &str,
             " confirm: y = resume anyway · n/Esc = cancel ",
             Style::default().fg(Color::Yellow),
         ),
-        Mode::DeleteConfirm { .. } => Span::styled(
-            " delete: y = trash · n/Esc = cancel ",
-            Style::default().fg(Color::Red),
-        ),
-        Mode::PruneInput { .. } | Mode::PruneConfirm { .. } => Span::styled(
-            " prune: Enter apply · Esc cancel ",
+        Mode::NicknameInput { .. } => Span::styled(
+            " n: set nickname  (Enter save · Esc cancel · empty = remove) ",
             Style::default().fg(Color::Yellow),
         ),
         Mode::Help => Span::styled(" ? / Esc to close ", Style::default().fg(Color::DarkGray)),
         Mode::List => Span::styled(
-            " Enter resume · v view · d delete · D prune · / filter · ? help · q quit ",
+            " Enter resume · v view · b bookmark · n nickname · / filter · ? help · q quit ",
             Style::default().fg(Color::DarkGray),
         ),
     };
@@ -354,22 +315,31 @@ fn ui(f: &mut Frame, sessions: &[&Session], state: &mut ListState, filter: &str,
     match mode {
         Mode::Confirm { session, pids } => render_confirm(f, size, session, pids),
         Mode::Help => render_help(f, size),
-        Mode::DeleteConfirm { session } => render_delete_confirm(f, size, session),
-        Mode::PruneInput { buf, error } => render_prune_input(f, size, buf, error.as_deref()),
-        Mode::PruneConfirm { age_str, matching } => {
-            render_prune_confirm(f, size, age_str, matching)
+        Mode::NicknameInput { session_id, buf } => {
+            render_nickname_input(f, size, session_id, buf)
         }
         Mode::List | Mode::Filter => {}
     }
 }
 
-fn render_list(f: &mut Frame, area: Rect, sessions: &[&Session], state: &mut ListState) {
+fn render_list(
+    f: &mut Frame,
+    area: Rect,
+    sessions: &[&Session],
+    state: &mut ListState,
+    bookmarked: &HashSet<String>,
+    nicknames: &HashMap<String, String>,
+) {
     let items: Vec<ListItem> = sessions
         .iter()
         .map(|s| {
             let project = project_basename(&s.cwd);
             let rel = relative_time(s.last_activity);
-            let mut spans = vec![
+            let mut spans = vec![Span::styled(
+                if bookmarked.contains(&s.id) { "★ " } else { "  " },
+                Style::default().fg(Color::Yellow),
+            )];
+            spans.extend([
                 Span::styled(
                     format!("[{}] ", s.backend),
                     Style::default().fg(Color::Magenta),
@@ -380,25 +350,26 @@ fn render_list(f: &mut Frame, area: Rect, sessions: &[&Session], state: &mut Lis
                         truncate(&project, PROJECT_COL_WIDTH),
                         w = PROJECT_COL_WIDTH
                     ),
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("  {rel}"), Style::default().fg(Color::DarkGray)),
-            ];
+            ]);
             if s.possibly_live {
                 spans.push(Span::styled(
                     "  ● live",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 ));
             }
-            let title = Line::from(Span::styled(
-                format!("  {}", s.title),
-                Style::default().fg(Color::White),
-            ));
-            ListItem::new(vec![Line::from(spans), title])
+            // Nickname replaces the generated title when set.
+            let (subtitle_text, subtitle_style) = if let Some(nick) = nicknames.get(&s.id) {
+                (format!("  {nick}"), Style::default().fg(Color::Yellow))
+            } else {
+                (format!("  {}", s.title), Style::default().fg(Color::White))
+            };
+            ListItem::new(vec![
+                Line::from(spans),
+                Line::from(Span::styled(subtitle_text, subtitle_style)),
+            ])
         })
         .collect();
 
@@ -413,7 +384,13 @@ fn render_list(f: &mut Frame, area: Rect, sessions: &[&Session], state: &mut Lis
     f.render_stateful_widget(list, area, state);
 }
 
-fn render_preview(f: &mut Frame, area: Rect, sessions: &[&Session], state: &ListState) {
+fn render_preview(
+    f: &mut Frame,
+    area: Rect,
+    sessions: &[&Session],
+    state: &ListState,
+    nicknames: &HashMap<String, String>,
+) {
     let block = Block::default().borders(Borders::ALL).title(" Preview ");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -421,7 +398,19 @@ fn render_preview(f: &mut Frame, area: Rect, sessions: &[&Session], state: &List
     let Some(sel) = state.selected() else { return };
     let Some(s) = sessions.get(sel) else { return };
 
-    let mut lines: Vec<Line> = vec![
+    let mut lines: Vec<Line> = Vec::new();
+
+    if let Some(nick) = nicknames.get(&s.id) {
+        lines.push(Line::from(vec![
+            dim("nick:   "),
+            Span::styled(
+                nick.clone(),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    lines.extend([
         Line::from(vec![
             dim("tool:   "),
             Span::styled(s.backend, Style::default().fg(Color::Magenta)),
@@ -446,7 +435,8 @@ fn render_preview(f: &mut Frame, area: Rect, sessions: &[&Session], state: &List
             Span::raw(s.message_count.to_string()),
         ]),
         Line::from(vec![dim("id:     "), Span::raw(s.id.clone())]),
-    ];
+    ]);
+
     if s.possibly_live {
         lines.push(Line::from(Span::styled(
             "status: ● recently active — may be running",
@@ -539,166 +529,40 @@ fn render_confirm(f: &mut Frame, area: Rect, session: &Session, pids: &[String])
     );
 }
 
-fn render_delete_confirm(f: &mut Frame, area: Rect, session: &Session) {
-    let area = centered(area, 70, 12);
+fn render_nickname_input(f: &mut Frame, area: Rect, session_id: &str, buf: &str) {
+    let area = centered(area, 62, 8);
     f.render_widget(Clear, area);
     let lines = vec![
         Line::from(Span::styled(
-            "⚠  Move session to trash?",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(vec![dim("tool:    "), Span::raw(session.backend)]),
-        Line::from(vec![dim("id:      "), Span::raw(&session.id)]),
-        Line::from(vec![
-            dim("cwd:     "),
-            Span::raw(session.cwd.display().to_string()),
-        ]),
-        Line::from(vec![
-            dim("title:   "),
-            Span::raw(truncate(&session.title, 60)),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "File moved to ~/.ccr/trash/ (restorable for 30 days).",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "[y]",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" trash    "),
-            Span::styled(
-                "[n]",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" cancel"),
-        ]),
-    ];
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Delete session ")
-        .border_style(Style::default().fg(Color::Red));
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        area,
-    );
-}
-
-fn render_prune_input(f: &mut Frame, area: Rect, buf: &str, error: Option<&str>) {
-    let area = centered(area, 64, 10);
-    f.render_widget(Clear, area);
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "Prune sessions older than:",
+            "Set session nickname:",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(vec![
-            dim("  age:   "),
+            dim("  id:    "),
+            Span::styled(
+                truncate(session_id, 44),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            dim("  name:  "),
             Span::styled(
                 format!("{buf}_"),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::from(dim("          (examples: 30d, 2w, 3mo, 1y)")),
         Line::from(""),
-    ];
-    if let Some(err) = error {
-        lines.push(Line::from(Span::styled(
-            format!("  error: {err}"),
-            Style::default().fg(Color::Red),
-        )));
-        lines.push(Line::from(""));
-    }
-    lines.push(Line::from(Span::styled(
-        "Enter to preview · Esc to cancel",
-        Style::default().fg(Color::DarkGray),
-    )));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Prune by age ")
-        .border_style(Style::default().fg(Color::Yellow));
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        area,
-    );
-}
-
-fn render_prune_confirm(f: &mut Frame, area: Rect, age_str: &str, matching: &[Session]) {
-    let h = (matching.len().min(8) as u16) + 10;
-    let area = centered(area, 80, h);
-    f.render_widget(Clear, area);
-    let title = if matching.is_empty() {
-        format!("No sessions older than {age_str}")
-    } else {
-        format!(
-            "Move {} session(s) older than {age_str} to trash?",
-            matching.len()
-        )
-    };
-    let mut lines = vec![
         Line::from(Span::styled(
-            title,
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-    ];
-    for s in matching.iter().take(8) {
-        lines.push(Line::from(vec![
-            dim(format!(" {} ", s.last_activity.format("%Y-%m-%d"))),
-            Span::styled(
-                format!(" [{}] ", s.backend),
-                Style::default().fg(Color::Magenta),
-            ),
-            Span::raw(truncate(&s.title, 56)),
-        ]));
-    }
-    if matching.len() > 8 {
-        lines.push(Line::from(dim(format!(
-            "  … and {} more",
-            matching.len() - 8
-        ))));
-    }
-    lines.push(Line::from(""));
-    if matching.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "[Esc] close",
+            "Enter save · Esc cancel · (empty = remove nickname)",
             Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "[y]",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" trash all    "),
-            Span::styled(
-                "[n]",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" cancel"),
-        ]));
-    }
+        )),
+    ];
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Prune confirm ")
+        .title(" Nickname ")
         .border_style(Style::default().fg(Color::Yellow));
     f.render_widget(
         Paragraph::new(lines)
@@ -709,7 +573,7 @@ fn render_prune_confirm(f: &mut Frame, area: Rect, age_str: &str, matching: &[Se
 }
 
 fn render_help(f: &mut Frame, area: Rect) {
-    let area = centered(area, 70, 22);
+    let area = centered(area, 70, 20);
     f.render_widget(Clear, area);
 
     let k = |key: &'static str, desc: &'static str| -> Line<'static> {
@@ -743,9 +607,9 @@ fn render_help(f: &mut Frame, area: Rect) {
         section("Actions"),
         k("Enter", "resume selected session (with live-check)"),
         k("v", "view session turns in agx (requires `agx` on PATH)"),
-        k("d", "delete selected (soft — moves to ~/.ccr/trash/)"),
-        k("D", "prune by age (7d/30d/90d/1y/custom)"),
-        k("/", "filter: title, cwd, tool, or preview content"),
+        k("b", "toggle bookmark (★ marker, persists in ~/.ccr/bookmarks.json)"),
+        k("n", "set nickname — shown in yellow instead of last message"),
+        k("/", "filter: title, cwd, tool, nickname, or content"),
         k("? / F1", "this help"),
         k("q / Esc", "quit"),
         Line::from(""),
@@ -791,20 +655,26 @@ mod tests {
         }
     }
 
+    fn no_nicknames() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
     #[test]
     fn empty_filter_matches_everything() {
-        assert!(matches_filter(&sess("hello", "/x", "claude"), ""));
+        assert!(matches_filter(&sess("hello", "/x", "claude"), "", &no_nicknames()));
     }
 
     #[test]
     fn filter_matches_title_case_insensitive() {
         assert!(matches_filter(
             &sess("Hello World", "/x", "claude"),
-            "HELLO"
+            "HELLO",
+            &no_nicknames()
         ));
         assert!(matches_filter(
             &sess("hello world", "/x", "claude"),
-            "Hello"
+            "Hello",
+            &no_nicknames()
         ));
     }
 
@@ -812,28 +682,38 @@ mod tests {
     fn filter_matches_cwd() {
         assert!(matches_filter(
             &sess("x", "/home/me/proj", "claude"),
-            "proj"
+            "proj",
+            &no_nicknames()
         ));
     }
 
     #[test]
     fn filter_matches_backend_tag() {
-        assert!(matches_filter(&sess("x", "/y", "claude"), "claud"));
+        assert!(matches_filter(&sess("x", "/y", "claude"), "claud", &no_nicknames()));
     }
 
     #[test]
     fn filter_rejects_no_match() {
-        assert!(!matches_filter(&sess("hello", "/y", "claude"), "xyz"));
+        assert!(!matches_filter(&sess("hello", "/y", "claude"), "xyz", &no_nicknames()));
     }
 
     #[test]
     fn filter_matches_full_turn_content() {
         let mut s = sess("unrelated title", "/x", "claude");
-        // searchable is stored pre-lowercased (see session::append_searchable).
         s.searchable = "the panic came from a race on ccr_trash_dir".into();
-        assert!(matches_filter(&s, "race"));
-        assert!(matches_filter(&s, "CCR_TRASH_DIR")); // needle is lowered
-        assert!(!matches_filter(&s, "nonexistentword"));
+        assert!(matches_filter(&s, "race", &no_nicknames()));
+        assert!(matches_filter(&s, "CCR_TRASH_DIR", &no_nicknames()));
+        assert!(!matches_filter(&s, "nonexistentword", &no_nicknames()));
+    }
+
+    #[test]
+    fn filter_matches_nickname() {
+        let s = sess("last user message", "/x", "claude");
+        let mut nicks = HashMap::new();
+        nicks.insert("x".into(), "auth refactor sprint".into());
+        assert!(matches_filter(&s, "auth", &nicks));
+        assert!(matches_filter(&s, "SPRINT", &nicks)); // case-insensitive
+        assert!(!matches_filter(&s, "xyz", &nicks));
     }
 
     #[test]

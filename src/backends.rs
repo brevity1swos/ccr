@@ -1,6 +1,8 @@
 use anyhow::Result;
 use std::process::Command;
 
+use rayon::prelude::*;
+
 use crate::session::{Session, Turn};
 use crate::util::pgrep_f;
 
@@ -32,14 +34,6 @@ pub trait Backend: Send + Sync {
         pgrep_f(&s.id)
     }
 
-    /// Move this session's on-disk files to the ccr trash directory.
-    /// Default: rename `session.origin` into `~/.ccr/trash/<backend>/<id>.jsonl`.
-    /// Override when the tool stores multiple files per session.
-    fn trash(&self, s: &Session) -> Result<()> {
-        crate::trash::move_to_trash(&s.origin, self.name(), &s.id)?;
-        Ok(())
-    }
-
     /// All user + assistant turns from the session, in chronological order.
     /// Re-reads the origin file (not capped like `Session.preview`). Used by
     /// `ccr export` to produce complete markdown / JSON dumps.
@@ -54,14 +48,18 @@ pub fn all() -> Vec<Box<dyn Backend>> {
     ]
 }
 
+/// Scan all backends in parallel, merge results sorted by last activity.
 pub fn scan_all(backends: &[Box<dyn Backend>]) -> Vec<Session> {
-    let mut out = Vec::new();
-    for b in backends {
-        match b.scan() {
-            Ok(sessions) => out.extend(sessions),
-            Err(e) => eprintln!("ccr: {} backend scan failed: {e}", b.name()),
-        }
-    }
+    let mut out: Vec<Session> = backends
+        .par_iter()
+        .flat_map(|b| match b.scan() {
+            Ok(sessions) => sessions,
+            Err(e) => {
+                eprintln!("ccr: {} backend scan failed: {e}", b.name());
+                Vec::new()
+            }
+        })
+        .collect();
     out.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
     out
 }
