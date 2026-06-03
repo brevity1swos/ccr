@@ -1,0 +1,17 @@
+# release-plz.toml — bump-vs-skip filter
+#
+# Only open release PRs for commits that materially affect end users.
+#   Include: feat / fix / perf / refactor / docs(readme)
+#   Exclude: chore, style, test, ci, build, generic docs:, docs(launch),
+#            and anything else — plumbing and internal tracking that
+#            shouldn't warrant a version bump.
+#
+# README changes are included because the README is ccr's GitHub front page;
+# launch-tracking and changelog-config commits are explicitly excluded.
+
+[workspace]
+changelog_config = "cliff.toml"
+allow_dirty = true
+git_release_enable = true
+git_tag_enable = true
+release_commits = "^(feat|fix|perf|refactor|docs?\\(readme\\))[(:!]"
