@@ -241,8 +241,7 @@ fn matches_filter(s: &Session, filter: &str, nicknames: &HashMap<String, String>
         || s.searchable.contains(&needle)
         || nicknames
             .get(&s.id)
-            .map(|n| n.to_lowercase().contains(&needle))
-            .unwrap_or(false)
+            .is_some_and(|n| n.to_lowercase().contains(&needle))
 }
 
 fn move_sel(state: &mut ListState, visible: &[&Session], delta: i32) {
