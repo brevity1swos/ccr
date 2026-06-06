@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-06
+
+### Refactoring
+
+- Use is_some_and for nickname filter match
+Replace map(...).unwrap_or(false) with the clearer is_some_and idiom in the
+  session filter predicate. No behavior change.
+
+
 ## [0.2.1](https://github.com/brevity1swos/ccr/compare/v0.2.0...v0.2.1) - 2026-05-23
 
 ### Added
