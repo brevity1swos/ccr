@@ -9,7 +9,9 @@ use std::process::Command;
 use rayon::prelude::*;
 
 use crate::backends::Backend;
-use crate::session::{PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn, append_searchable};
+use crate::session::{
+    PLACEHOLDER_TITLE, PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn, append_searchable,
+};
 use crate::util::{is_possibly_live, truncate};
 
 pub struct GeminiBackend;
@@ -208,7 +210,7 @@ pub(crate) fn parse_session_from_json(
         turns.push_back(Turn { role, text });
     }
 
-    let title = title.unwrap_or_else(|| "(no user message)".into());
+    let title = title.unwrap_or_else(|| PLACEHOLDER_TITLE.into());
 
     Ok(Some(Session {
         backend: GeminiBackend::NAME,

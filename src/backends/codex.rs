@@ -10,7 +10,9 @@ use std::process::Command;
 use rayon::prelude::*;
 
 use crate::backends::Backend;
-use crate::session::{PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn, append_searchable};
+use crate::session::{
+    PLACEHOLDER_TITLE, PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn, append_searchable,
+};
 use crate::util::{is_possibly_live, truncate};
 
 pub struct CodexBackend;
@@ -122,33 +124,24 @@ fn read_head_line(path: &Path) -> Option<String> {
 /// Parse one Codex session from head meta + a bounded tail window.
 fn scan_one(path: &Path) -> Option<Session> {
     let head = read_head_line(path)?;
-    let mut window = crate::tail::TAIL_WINDOW_INITIAL;
-    loop {
-        let (tail, reached_start) = crate::tail::read_tail(path, window).ok()?;
-        // Prepend head so `session_meta` (id+cwd) is always present. When
-        // reached_start the head line is already inside the tail window, so
-        // skip the prepend to avoid a duplicate session_meta and the extra
-        // allocation.
-        let combined;
-        let reader = if reached_start {
-            Cursor::new(tail.as_str())
-        } else {
-            combined = format!("{head}\n{tail}");
-            Cursor::new(combined.as_str())
-        };
-        let parsed = parse_session_from_reader(reader, path.to_path_buf()).ok()?;
-        let mut s = parsed?;
-        let found_title = s.title != "(no user message)";
-        if found_title || reached_start || window >= crate::tail::TAIL_WINDOW_MAX {
-            s.message_count = None;
-            if s.last_activity == Local.timestamp_opt(0, 0).unwrap() {
-                s.last_activity = crate::util::file_mtime(path);
-                s.possibly_live = crate::util::is_possibly_live(s.last_activity);
-            }
-            return Some(s);
-        }
-        window = window.saturating_mul(4).min(crate::tail::TAIL_WINDOW_MAX);
-    }
+    crate::tail::scan_windowed(
+        path,
+        crate::tail::TAIL_WINDOW_INITIAL,
+        crate::tail::TAIL_WINDOW_MAX,
+        |tail, reached_start| {
+            // Prepend head so `session_meta` (id+cwd) is always present. When
+            // reached_start the head line is already inside the tail window, so
+            // skip the prepend to avoid a duplicate session_meta and the extra
+            // allocation.
+            let parsed = if reached_start {
+                parse_session_from_reader(Cursor::new(tail), path.to_path_buf())
+            } else {
+                let combined = format!("{head}\n{tail}");
+                parse_session_from_reader(Cursor::new(combined.as_str()), path.to_path_buf())
+            };
+            parsed.ok().flatten()
+        },
+    )
 }
 
 pub(crate) fn parse_session_from_reader(
@@ -219,7 +212,7 @@ pub(crate) fn parse_session_from_reader(
 
     let Some(id) = id else { return Ok(None) };
     let cwd = cwd.unwrap_or_else(|| PathBuf::from("(unknown)"));
-    let title = title.unwrap_or_else(|| "(no user message)".into());
+    let title = title.unwrap_or_else(|| PLACEHOLDER_TITLE.into());
     let last_activity = last_ts.unwrap_or_else(|| Local.timestamp_opt(0, 0).unwrap());
 
     Ok(Some(Session {

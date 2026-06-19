@@ -4,6 +4,10 @@ use std::path::PathBuf;
 pub const TITLE_MAX: usize = 80;
 pub const PREVIEW_TURNS: usize = 6;
 pub const LIVE_WINDOW_SECS: i64 = 300;
+/// Title used when a session has no user message yet. The tail-window scan
+/// treats a title still equal to this as "not yet resolved" and keeps growing
+/// the window.
+pub const PLACEHOLDER_TITLE: &str = "(no user message)";
 /// Max bytes of lowercase turn text retained per session for `/` content
 /// filtering. After the tail-read scan this covers the recent (tail-window)
 /// turns, not the full history — full-content search is a deferred follow-up.
