@@ -191,7 +191,7 @@ pub(crate) fn parse_session_from_reader(
         cwd,
         title,
         last_activity,
-        message_count,
+        message_count: Some(message_count),
         preview: turns.into_iter().collect(),
         possibly_live: is_possibly_live(last_activity),
         origin,
@@ -264,6 +264,6 @@ mod tests {
 "#;
         let s = parse(jsonl).expect("session");
         assert_eq!(s.title, "actual");
-        assert_eq!(s.message_count, 1);
+        assert_eq!(s.message_count, Some(1));
     }
 }

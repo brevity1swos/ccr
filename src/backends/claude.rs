@@ -190,7 +190,7 @@ pub(crate) fn parse_session_from_reader(
         cwd,
         title,
         last_activity,
-        message_count,
+        message_count: Some(message_count),
         preview: turns.into_iter().collect(),
         possibly_live: is_possibly_live(last_activity),
         origin,
@@ -219,7 +219,7 @@ mod tests {
         assert_eq!(s.backend, "claude");
         assert_eq!(s.cwd, PathBuf::from("/home/me/proj"));
         assert_eq!(s.title, "follow up question");
-        assert_eq!(s.message_count, 3);
+        assert_eq!(s.message_count, Some(3));
         assert_eq!(s.preview.len(), 3);
         assert_eq!(s.preview[0].role, Role::User);
         assert_eq!(s.preview[1].role, Role::Assistant);
@@ -233,7 +233,7 @@ mod tests {
 "#;
         let s = parse(jsonl);
         assert_eq!(s.title, "real");
-        assert_eq!(s.message_count, 1);
+        assert_eq!(s.message_count, Some(1));
     }
 
     #[test]
@@ -251,7 +251,7 @@ mod tests {
 "#;
         let s = parse(jsonl);
         assert_eq!(s.title, "(no user message)");
-        assert_eq!(s.message_count, 0);
+        assert_eq!(s.message_count, Some(0));
     }
 
     #[test]
@@ -259,7 +259,7 @@ mod tests {
         let jsonl = "not json\n\n{\"type\":\"user\",\"cwd\":\"/x\",\"timestamp\":\"2026-04-19T10:00:00Z\",\"message\":{\"content\":\"ok\"}}\n";
         let s = parse(jsonl);
         assert_eq!(s.title, "ok");
-        assert_eq!(s.message_count, 1);
+        assert_eq!(s.message_count, Some(1));
     }
 
     #[test]
@@ -294,7 +294,7 @@ mod tests {
             ));
         }
         let s = parse(&jsonl);
-        assert_eq!(s.message_count, 20);
+        assert_eq!(s.message_count, Some(20));
         assert_eq!(s.preview.len(), PREVIEW_TURNS);
         assert_eq!(s.preview.last().unwrap().text, "msg 19");
     }

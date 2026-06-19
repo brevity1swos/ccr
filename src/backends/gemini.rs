@@ -216,7 +216,7 @@ pub(crate) fn parse_session_from_json(
         cwd,
         title,
         last_activity,
-        message_count,
+        message_count: Some(message_count),
         preview: turns.into_iter().collect(),
         possibly_live: is_possibly_live(last_activity),
         origin,
@@ -258,7 +258,7 @@ mod tests {
         let s = parse(json).expect("session");
         assert_eq!(s.id, "abc-123");
         assert_eq!(s.title, "hello");
-        assert_eq!(s.message_count, 2);
+        assert_eq!(s.message_count, Some(2));
         assert_eq!(s.preview[0].role, Role::User);
         assert_eq!(s.preview[1].role, Role::Assistant);
         assert_eq!(s.backend, "gemini");
@@ -282,6 +282,6 @@ mod tests {
         }"#;
         let s = parse(json).expect("session");
         assert_eq!(s.title, "real");
-        assert_eq!(s.message_count, 1);
+        assert_eq!(s.message_count, Some(1));
     }
 }

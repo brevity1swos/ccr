@@ -41,7 +41,10 @@ pub struct Session {
     pub cwd: PathBuf,
     pub title: String,
     pub last_activity: DateTime<Local>,
-    pub message_count: usize,
+    /// Exact user+assistant turn count, or `None` when scan used a partial
+    /// tail window and the true total was not computed. Filled lazily by the
+    /// TUI detail pane and by `ccr stats` via `Backend::all_turns`.
+    pub message_count: Option<usize>,
     pub preview: Vec<Turn>,
     pub possibly_live: bool,
     /// Absolute path to the on-disk file this session was parsed from.

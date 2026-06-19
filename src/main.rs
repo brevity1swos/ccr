@@ -141,7 +141,7 @@ pub(crate) fn format_stats(sessions: &[Session]) -> String {
 
     let mut out = String::new();
     let total = sessions.len();
-    let total_turns: usize = sessions.iter().map(|s| s.message_count).sum();
+    let total_turns: usize = sessions.iter().filter_map(|s| s.message_count).sum();
     let tools: std::collections::BTreeSet<&str> = sessions.iter().map(|s| s.backend).collect();
 
     out.push_str(&format!(
@@ -156,7 +156,7 @@ pub(crate) fn format_stats(sessions: &[Session]) -> String {
     for s in sessions {
         let e = by_tool.entry(s.backend).or_default();
         e.0 += 1;
-        e.1 += s.message_count;
+        e.1 += s.message_count.unwrap_or(0);
     }
     out.push_str("\nBy tool:\n");
     let mut tool_rows: Vec<_> = by_tool.iter().collect();
@@ -308,7 +308,7 @@ mod tests {
             cwd: PathBuf::from("/proj"),
             title: "hi".into(),
             last_activity: Local::now(),
-            message_count: 2,
+            message_count: Some(2),
             preview: Vec::new(),
             possibly_live: false,
             origin: PathBuf::from("<t>"),
@@ -363,12 +363,12 @@ mod tests {
         let mut a = sample_session();
         a.cwd = PathBuf::from("/repos/alpha");
         a.backend = "claude";
-        a.message_count = 10;
+        a.message_count = Some(10);
         let mut b = a.clone();
         b.id = "def".into();
         b.backend = "codex";
         b.cwd = PathBuf::from("/repos/beta");
-        b.message_count = 3;
+        b.message_count = Some(3);
 
         let out = format_stats(&[a, b]);
         assert!(out.contains("Total: 2 sessions"));

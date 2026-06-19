@@ -466,7 +466,11 @@ fn render_preview(
         ]),
         Line::from(vec![
             dim("msgs:   "),
-            Span::raw(s.message_count.to_string()),
+            Span::raw(
+                s.message_count
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "…".into()),
+            ),
         ]),
         Line::from(vec![dim("id:     "), Span::raw(s.id.clone())]),
     ]);
@@ -689,7 +693,7 @@ mod tests {
             cwd: PathBuf::from(cwd),
             title: title.into(),
             last_activity: Local::now(),
-            message_count: 0,
+            message_count: Some(0),
             preview: Vec::new(),
             possibly_live: false,
             origin: PathBuf::from("<test>"),
