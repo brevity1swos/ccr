@@ -6,7 +6,6 @@ use std::path::Path;
 /// lines. When the window starts mid-file, the partial leading line is dropped
 /// so callers always parse whole records. Returns `(text, reached_start)` where
 /// `reached_start` is true when the window covers the file from byte 0.
-#[allow(dead_code)]
 pub fn read_tail(path: &Path, window: u64) -> std::io::Result<(String, bool)> {
     let mut f = File::open(path)?;
     let len = f.metadata()?.len();

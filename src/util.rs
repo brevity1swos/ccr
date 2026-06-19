@@ -70,7 +70,6 @@ pub fn pgrep_f(pattern: &str) -> Vec<String> {
 /// File modification time as `DateTime<Local>`, or the unix epoch when the
 /// file is missing or has no mtime. Used as a last-resort `last_activity`
 /// when a tail window yields no message timestamp.
-#[allow(dead_code)]
 pub fn file_mtime(path: &Path) -> DateTime<Local> {
     match std::fs::metadata(path).and_then(|m| m.modified()) {
         Ok(t) => DateTime::<Utc>::from(t).with_timezone(&Local),

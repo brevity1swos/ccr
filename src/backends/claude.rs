@@ -3,11 +3,16 @@ use chrono::{DateTime, Local, TimeZone};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Cursor};
 use std::path::PathBuf;
 use std::process::Command;
 
 use rayon::prelude::*;
+
+/// Initial tail window. Title (last user message) is normally within this.
+const TAIL_WINDOW_INITIAL: u64 = 64 * 1024;
+/// Hard cap on window growth when hunting for the last user message.
+const TAIL_WINDOW_MAX: u64 = 4 * 1024 * 1024;
 
 use crate::backends::Backend;
 use crate::session::{PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn, append_searchable};
@@ -59,17 +64,7 @@ impl Backend for ClaudeBackend {
         }
         // Parallel parse — dominates on NFS / shared filesystems where
         // per-file latency is the bottleneck (HPC home dirs, etc.).
-        let out: Vec<Session> = files
-            .par_iter()
-            .filter_map(|p| {
-                let id = p
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .filter(|s| !s.is_empty())?;
-                let file = fs::File::open(p).ok()?;
-                parse_session_from_reader(id, p.clone(), BufReader::new(file)).ok()
-            })
-            .collect();
+        let out: Vec<Session> = files.par_iter().filter_map(|p| scan_one(p)).collect();
         Ok(out)
     }
 
@@ -105,6 +100,35 @@ impl Backend for ClaudeBackend {
             turns.push(Turn { role, text });
         }
         Ok(turns)
+    }
+}
+
+/// Parse one Claude session from a bounded tail window, growing the window
+/// (up to `TAIL_WINDOW_MAX`) only while the title is still the placeholder and
+/// the file start has not been reached. Returns `None` on unreadable files or
+/// empty ids.
+fn scan_one(path: &std::path::Path) -> Option<Session> {
+    let id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let mut window = TAIL_WINDOW_INITIAL;
+    loop {
+        let (text, reached_start) = crate::tail::read_tail(path, window).ok()?;
+        let mut s = parse_session_from_reader(&id, path.to_path_buf(), Cursor::new(&text)).ok()?;
+        let found_title = s.title != "(no user message)";
+        if found_title || reached_start || window >= TAIL_WINDOW_MAX {
+            // Count is only a window-local undercount; expose it as unknown.
+            s.message_count = None;
+            // If the window had no timestamp at all, fall back to mtime.
+            if s.last_activity == chrono::Local.timestamp_opt(0, 0).unwrap() {
+                s.last_activity = crate::util::file_mtime(path);
+                s.possibly_live = crate::util::is_possibly_live(s.last_activity);
+            }
+            return Some(s);
+        }
+        window = window.saturating_mul(4);
     }
 }
 
@@ -297,5 +321,27 @@ mod tests {
         assert_eq!(s.message_count, Some(20));
         assert_eq!(s.preview.len(), PREVIEW_TURNS);
         assert_eq!(s.preview.last().unwrap().text, "msg 19");
+    }
+
+    #[test]
+    fn scan_one_reads_tail_and_nulls_count() {
+        use std::io::Write;
+        let mut path = std::env::temp_dir();
+        path.push("ccr-claude-scan-one.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for i in 0..50 {
+            writeln!(
+                f,
+                r#"{{"type":"user","cwd":"/proj","timestamp":"2026-04-19T10:00:0{}Z","message":{{"content":"msg {}"}}}}"#,
+                i % 10, i
+            )
+            .unwrap();
+        }
+        let s = scan_one(&path).expect("session");
+        assert_eq!(s.cwd, std::path::PathBuf::from("/proj"));
+        assert!(s.title.starts_with("msg "));
+        assert_eq!(s.message_count, None); // tail window => count not computed
+        assert_eq!(s.preview.len(), PREVIEW_TURNS);
+        std::fs::remove_file(&path).ok();
     }
 }
