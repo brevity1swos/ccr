@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use std::path::Path;
 use std::process::Command;
 
@@ -65,6 +65,17 @@ pub fn pgrep_f(pattern: &str) -> Vec<String> {
         })
         .map(String::from)
         .collect()
+}
+
+/// File modification time as `DateTime<Local>`, or the unix epoch when the
+/// file is missing or has no mtime. Used as a last-resort `last_activity`
+/// when a tail window yields no message timestamp.
+#[allow(dead_code)]
+pub fn file_mtime(path: &Path) -> DateTime<Local> {
+    match std::fs::metadata(path).and_then(|m| m.modified()) {
+        Ok(t) => DateTime::<Utc>::from(t).with_timezone(&Local),
+        Err(_) => Local.timestamp_opt(0, 0).unwrap(),
+    }
 }
 
 #[cfg(test)]
@@ -147,5 +158,23 @@ mod tests {
     #[test]
     fn pgrep_f_returns_empty_for_improbable_pattern() {
         assert!(pgrep_f("!!!definitely-not-a-real-process-pattern-xyz!!!").is_empty());
+    }
+
+    #[test]
+    fn file_mtime_of_existing_file_is_recent() {
+        use std::io::Write;
+        let mut p = std::env::temp_dir();
+        p.push("ccr-mtime-test");
+        std::fs::File::create(&p).unwrap().write_all(b"x").unwrap();
+        let mt = file_mtime(&p);
+        // within a day of now (loose; just proves it read a real mtime)
+        assert!((Local::now() - mt).num_seconds().abs() < 86_400);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn file_mtime_of_missing_file_is_epoch() {
+        let mt = file_mtime(std::path::Path::new("/no/such/ccr/path"));
+        assert_eq!(mt.timestamp(), 0);
     }
 }
