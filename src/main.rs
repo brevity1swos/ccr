@@ -258,7 +258,7 @@ pub(crate) fn format_json(s: &Session, turns: &[Turn]) -> Result<String> {
         "backend": s.backend,
         "cwd": s.cwd.to_string_lossy(),
         "last_activity": s.last_activity.to_rfc3339(),
-        "message_count": s.message_count,
+        "message_count": turns.len(),
         "turns": turns_json,
     });
     Ok(serde_json::to_string_pretty(&doc)?)
@@ -382,6 +382,17 @@ mod tests {
         let sessions = vec![s];
         let filled = fill_counts(sessions, |_s| 7);
         assert_eq!(filled[0].message_count, Some(7));
+    }
+
+    #[test]
+    fn format_json_message_count_is_turn_count_not_null() {
+        let mut s = sample_session();
+        s.message_count = None;
+        let turns = sample_turns(); // 2 turns
+        let json = format_json(&s, &turns).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["message_count"], 2);
+        assert!(!v["message_count"].is_null());
     }
 
     #[test]
