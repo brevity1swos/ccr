@@ -9,11 +9,6 @@ use std::process::Command;
 
 use rayon::prelude::*;
 
-/// Initial tail window. Title (last user message) is normally within this.
-const TAIL_WINDOW_INITIAL: u64 = 64 * 1024;
-/// Hard cap on window growth when hunting for the last user message.
-const TAIL_WINDOW_MAX: u64 = 4 * 1024 * 1024;
-
 use crate::backends::Backend;
 use crate::session::{PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn, append_searchable};
 use crate::util::{is_possibly_live, truncate};
@@ -108,17 +103,28 @@ impl Backend for ClaudeBackend {
 /// the file start has not been reached. Returns `None` on unreadable files or
 /// empty ids.
 fn scan_one(path: &std::path::Path) -> Option<Session> {
+    scan_one_windowed(
+        path,
+        crate::tail::TAIL_WINDOW_INITIAL,
+        crate::tail::TAIL_WINDOW_MAX,
+    )
+}
+
+/// Window-bounded core of `scan_one`. Split out so tests can drive the
+/// growth loop with tiny bounds and assert it terminates at `max` even when
+/// the title is never found (a file larger than `max` with no user message).
+fn scan_one_windowed(path: &std::path::Path, initial: u64, max: u64) -> Option<Session> {
     let id = path
         .file_stem()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())?
         .to_string();
-    let mut window = TAIL_WINDOW_INITIAL;
+    let mut window = initial;
     loop {
         let (text, reached_start) = crate::tail::read_tail(path, window).ok()?;
         let mut s = parse_session_from_reader(&id, path.to_path_buf(), Cursor::new(&text)).ok()?;
         let found_title = s.title != "(no user message)";
-        if found_title || reached_start || window >= TAIL_WINDOW_MAX {
+        if found_title || reached_start || window >= max {
             // Count is only a window-local undercount; expose it as unknown.
             s.message_count = None;
             // If the window had no timestamp at all, fall back to mtime.
@@ -128,7 +134,7 @@ fn scan_one(path: &std::path::Path) -> Option<Session> {
             }
             return Some(s);
         }
-        window = window.saturating_mul(4);
+        window = window.saturating_mul(4).min(max);
     }
 }
 
@@ -342,6 +348,30 @@ mod tests {
         assert!(s.title.starts_with("msg "));
         assert_eq!(s.message_count, None); // tail window => count not computed
         assert_eq!(s.preview.len(), PREVIEW_TURNS);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn scan_one_windowed_terminates_at_max_without_title() {
+        // A file larger than `max` whose window never contains a user message
+        // (assistant-only) must still terminate via the `window >= max` guard
+        // rather than looping forever re-reading the capped window.
+        use std::io::Write;
+        let mut path = std::env::temp_dir();
+        path.push(format!("ccr-claude-no-title-{}.jsonl", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        for i in 0..40 {
+            writeln!(
+                f,
+                r#"{{"type":"assistant","cwd":"/p","timestamp":"2026-04-19T10:00:00Z","message":{{"content":"reply {}"}}}}"#,
+                i
+            )
+            .unwrap();
+        }
+        // initial=16, max=64: file (~hundreds of bytes) exceeds max, so the tail
+        // window never reaches the file start and no user message is ever found.
+        let s = scan_one_windowed(&path, 16, 64).expect("session");
+        assert_eq!(s.title, "(no user message)");
         std::fs::remove_file(&path).ok();
     }
 

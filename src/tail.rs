@@ -2,6 +2,11 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+/// Initial tail window. Title (last user message) is normally within this.
+pub(crate) const TAIL_WINDOW_INITIAL: u64 = 64 * 1024;
+/// Hard cap on window growth when hunting for the last user message.
+pub(crate) const TAIL_WINDOW_MAX: u64 = 4 * 1024 * 1024;
+
 /// Read up to `window` bytes from the end of `path`, returning only complete
 /// lines. When the window starts mid-file, the partial leading line is dropped
 /// so callers always parse whole records. Returns `(text, reached_start)` where

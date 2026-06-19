@@ -9,9 +9,6 @@ use std::process::Command;
 
 use rayon::prelude::*;
 
-const TAIL_WINDOW_INITIAL: u64 = 64 * 1024;
-const TAIL_WINDOW_MAX: u64 = 4 * 1024 * 1024;
-
 use crate::backends::Backend;
 use crate::session::{PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn, append_searchable};
 use crate::util::{is_possibly_live, truncate};
@@ -125,17 +122,24 @@ fn read_head_line(path: &Path) -> Option<String> {
 /// Parse one Codex session from head meta + a bounded tail window.
 fn scan_one(path: &Path) -> Option<Session> {
     let head = read_head_line(path)?;
-    let mut window = TAIL_WINDOW_INITIAL;
+    let mut window = crate::tail::TAIL_WINDOW_INITIAL;
     loop {
         let (tail, reached_start) = crate::tail::read_tail(path, window).ok()?;
-        // Prepend head so `session_meta` (id+cwd) is always present; the head
-        // record may already be inside the tail window when reached_start, but
-        // duplicate session_meta lines are idempotent (last write wins on id/cwd).
-        let combined = format!("{head}\n{tail}");
-        let parsed = parse_session_from_reader(Cursor::new(&combined), path.to_path_buf()).ok()?;
+        // Prepend head so `session_meta` (id+cwd) is always present. When
+        // reached_start the head line is already inside the tail window, so
+        // skip the prepend to avoid a duplicate session_meta and the extra
+        // allocation.
+        let combined;
+        let reader = if reached_start {
+            Cursor::new(tail.as_str())
+        } else {
+            combined = format!("{head}\n{tail}");
+            Cursor::new(combined.as_str())
+        };
+        let parsed = parse_session_from_reader(reader, path.to_path_buf()).ok()?;
         let mut s = parsed?;
         let found_title = s.title != "(no user message)";
-        if found_title || reached_start || window >= TAIL_WINDOW_MAX {
+        if found_title || reached_start || window >= crate::tail::TAIL_WINDOW_MAX {
             s.message_count = None;
             if s.last_activity == Local.timestamp_opt(0, 0).unwrap() {
                 s.last_activity = crate::util::file_mtime(path);
@@ -143,7 +147,7 @@ fn scan_one(path: &Path) -> Option<Session> {
             }
             return Some(s);
         }
-        window = window.saturating_mul(4);
+        window = window.saturating_mul(4).min(crate::tail::TAIL_WINDOW_MAX);
     }
 }
 
