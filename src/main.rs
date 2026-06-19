@@ -128,9 +128,26 @@ pub(crate) fn format_md(s: &Session, turns: &[Turn]) -> String {
     out
 }
 
+/// Replace any `None` message_count with a freshly computed value. The counter
+/// is injected so the hot path stays testable without touching the filesystem.
+fn fill_counts(mut sessions: Vec<Session>, count: impl Fn(&Session) -> usize) -> Vec<Session> {
+    for s in &mut sessions {
+        if s.message_count.is_none() {
+            s.message_count = Some(count(s));
+        }
+    }
+    sessions
+}
+
 fn run_stats() -> Result<()> {
     let backends = all();
     let sessions = scan_all(&backends);
+    let sessions = fill_counts(sessions, |s| {
+        by_name(&backends, s.backend)
+            .and_then(|b| b.all_turns(s).ok())
+            .map(|t| t.len())
+            .unwrap_or(0)
+    });
     print!("{}", format_stats(&sessions));
     Ok(())
 }
@@ -356,6 +373,15 @@ mod tests {
     fn format_stats_on_empty_still_prints_zero_row() {
         let out = format_stats(&[]);
         assert!(out.starts_with("Total: 0 sessions"));
+    }
+
+    #[test]
+    fn fill_counts_replaces_none_with_computed() {
+        let mut s = sample_session();
+        s.message_count = None;
+        let sessions = vec![s];
+        let filled = fill_counts(sessions, |_s| 7);
+        assert_eq!(filled[0].message_count, Some(7));
     }
 
     #[test]
