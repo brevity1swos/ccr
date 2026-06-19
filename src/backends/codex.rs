@@ -3,11 +3,14 @@ use chrono::{DateTime, Local, TimeZone};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Cursor};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rayon::prelude::*;
+
+const TAIL_WINDOW_INITIAL: u64 = 64 * 1024;
+const TAIL_WINDOW_MAX: u64 = 4 * 1024 * 1024;
 
 use crate::backends::Backend;
 use crate::session::{PREVIEW_TURNS, Role, Session, TITLE_MAX, Turn, append_searchable};
@@ -45,10 +48,7 @@ impl Backend for CodexBackend {
         let mut files = Vec::new();
         walk_jsonl(&root, &mut files)?;
         // Parallel parse — see claude backend comment on HPC latency.
-        let out: Vec<Session> = files
-            .par_iter()
-            .filter_map(|p| parse_session(p).ok().flatten())
-            .collect();
+        let out: Vec<Session> = files.par_iter().filter_map(|p| scan_one(p)).collect();
         Ok(out)
     }
 
@@ -109,9 +109,42 @@ fn walk_jsonl(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn parse_session(path: &Path) -> Result<Option<Session>> {
-    let file = fs::File::open(path)?;
-    parse_session_from_reader(BufReader::new(file), path.to_path_buf())
+/// Read the first line (Codex `session_meta` with id + cwd).
+fn read_head_line(path: &Path) -> Option<String> {
+    let f = fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(f);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    if line.trim().is_empty() {
+        None
+    } else {
+        Some(line)
+    }
+}
+
+/// Parse one Codex session from head meta + a bounded tail window.
+fn scan_one(path: &Path) -> Option<Session> {
+    let head = read_head_line(path)?;
+    let mut window = TAIL_WINDOW_INITIAL;
+    loop {
+        let (tail, reached_start) = crate::tail::read_tail(path, window).ok()?;
+        // Prepend head so `session_meta` (id+cwd) is always present; the head
+        // record may already be inside the tail window when reached_start, but
+        // duplicate session_meta lines are idempotent (last write wins on id/cwd).
+        let combined = format!("{head}\n{tail}");
+        let parsed = parse_session_from_reader(Cursor::new(&combined), path.to_path_buf()).ok()?;
+        let mut s = parsed?;
+        let found_title = s.title != "(no user message)";
+        if found_title || reached_start || window >= TAIL_WINDOW_MAX {
+            s.message_count = None;
+            if s.last_activity == Local.timestamp_opt(0, 0).unwrap() {
+                s.last_activity = crate::util::file_mtime(path);
+                s.possibly_live = crate::util::is_possibly_live(s.last_activity);
+            }
+            return Some(s);
+        }
+        window = window.saturating_mul(4);
+    }
 }
 
 pub(crate) fn parse_session_from_reader(
@@ -254,6 +287,33 @@ mod tests {
         let jsonl = r#"{"type":"response_item","timestamp":"2026-04-01T19:28:40Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}
 "#;
         assert!(parse(jsonl).is_none());
+    }
+
+    #[test]
+    fn scan_one_uses_head_meta_and_tail_turns() {
+        use std::io::Write;
+        let mut path = std::env::temp_dir();
+        path.push("ccr-codex-scan-one.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"session_meta","timestamp":"2026-04-01T19:28:35Z","payload":{{"id":"sid-9","cwd":"/my/proj"}}}}"#
+        )
+        .unwrap();
+        for i in 0..40 {
+            writeln!(
+                f,
+                r#"{{"type":"response_item","timestamp":"2026-04-01T19:29:0{}Z","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"q {}"}}]}}}}"#,
+                i % 10, i
+            )
+            .unwrap();
+        }
+        let s = scan_one(&path).expect("session");
+        assert_eq!(s.id, "sid-9");
+        assert_eq!(s.cwd, std::path::PathBuf::from("/my/proj"));
+        assert!(s.title.starts_with("q "));
+        assert_eq!(s.message_count, None);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
