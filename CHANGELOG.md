@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-06-19
+
+### Bug Fixes
+
+- *(stats)* Compute exact turn counts after tail-read scan
+- *(export)* Emit exact message_count in json instead of null
+
+### Documentation
+
+- *(scan)* Document tail-window searchable scope
+
+### Features
+
+- *(scan)* Add read_tail byte-windowed file reader
+- *(util)* Add file_mtime fallback for last_activity
+- *(tui)* Compute detail-pane message count lazily
+
+### Performance
+
+- *(claude)* Scan only a tail window instead of full files
+- *(codex)* Scan head meta + tail window instead of full files
+
+### Refactoring
+
+- *(session)* Make message_count Option for lazy counting
+- *(scan)* Dedup tail-window constants and tidy scan loops
+- *(scan)* Extract shared tail-window scan loop into tail::scan_windowed
+
+
 ## [0.2.2] - 2026-06-06
 
 ### Refactoring
