@@ -5,6 +5,7 @@ mod backends;
 mod bookmarks;
 mod nicknames;
 mod session;
+mod tail;
 mod tui;
 mod util;
 
