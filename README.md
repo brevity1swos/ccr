@@ -101,7 +101,7 @@ ccr
 | `g` / `Home`| jump to top                             |
 | `G` / `End` | jump to bottom                          |
 | `PgUp/Dn`   | page up/down (10 rows)                  |
-| `/`         | filter: title, cwd, tool, nickname, or content |
+| `/`         | filter: title, cwd, tool, nickname, or content (recent turns only) |
 | `Enter`     | resume selected session (live-checked)  |
 | `v`         | open session in [agx] (timeline viewer) |
 | `b`         | toggle bookmark (★ marker, persisted)   |

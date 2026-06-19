@@ -344,4 +344,24 @@ mod tests {
         assert_eq!(s.preview.len(), PREVIEW_TURNS);
         std::fs::remove_file(&path).ok();
     }
+
+    #[test]
+    fn tail_scan_searchable_covers_recent_turns() {
+        use std::io::Write;
+        let mut path = std::env::temp_dir();
+        path.push("ccr-claude-searchable.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for i in 0..30 {
+            writeln!(
+                f,
+                r#"{{"type":"user","cwd":"/p","timestamp":"2026-04-19T10:00:00Z","message":{{"content":"needle{}"}}}}"#,
+                i
+            )
+            .unwrap();
+        }
+        let s = scan_one(&path).expect("session");
+        // recent turns are present in searchable
+        assert!(s.searchable.contains("needle29"));
+        std::fs::remove_file(&path).ok();
+    }
 }

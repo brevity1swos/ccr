@@ -4,8 +4,9 @@ use std::path::PathBuf;
 pub const TITLE_MAX: usize = 80;
 pub const PREVIEW_TURNS: usize = 6;
 pub const LIVE_WINDOW_SECS: i64 = 300;
-/// Max bytes of lowercase turn text retained per session for `/` content filtering.
-/// Cap prevents a single long session from blowing memory across hundreds of sessions.
+/// Max bytes of lowercase turn text retained per session for `/` content
+/// filtering. After the tail-read scan this covers the recent (tail-window)
+/// turns, not the full history — full-content search is a deferred follow-up.
 pub const SEARCHABLE_CAP: usize = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
