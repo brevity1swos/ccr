@@ -75,6 +75,7 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
     let mut mode = Mode::List;
     let mut bookmarked: HashSet<String> = bookmarks::load();
     let mut nicknames: HashMap<String, String> = nicknames::load();
+    let mut count_cache: HashMap<String, usize> = HashMap::new();
 
     let result = loop {
         let visible: Vec<&Session> = sessions
@@ -91,6 +92,16 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
             _ => {}
         }
 
+        let selected_count: Option<usize> =
+            state.selected().and_then(|i| visible.get(i)).map(|s| {
+                exact_count_for(&mut count_cache, &s.id, s.message_count, || {
+                    by_name(backends, s.backend)
+                        .and_then(|b| b.all_turns(s).ok())
+                        .map(|t| t.len())
+                        .unwrap_or(0)
+                })
+            });
+
         terminal.draw(|f| {
             ui(
                 f,
@@ -100,6 +111,7 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
                 &mode,
                 &bookmarked,
                 &nicknames,
+                selected_count,
             )
         })?;
 
@@ -253,6 +265,26 @@ fn move_sel(state: &mut ListState, visible: &[&Session], delta: i32) {
     state.select(Some(new as usize));
 }
 
+/// Resolve a session's exact turn count: `Some(n)` short-circuits; otherwise
+/// compute via `yield_turns` once and memoize under `id`.
+fn exact_count_for(
+    cache: &mut HashMap<String, usize>,
+    id: &str,
+    known: Option<usize>,
+    yield_turns: impl FnOnce() -> usize,
+) -> usize {
+    if let Some(n) = known {
+        return n;
+    }
+    if let Some(&n) = cache.get(id) {
+        return n;
+    }
+    let n = yield_turns();
+    cache.insert(id.to_string(), n);
+    n
+}
+
+#[allow(clippy::too_many_arguments)]
 fn ui(
     f: &mut Frame,
     sessions: &[&Session],
@@ -261,6 +293,7 @@ fn ui(
     mode: &Mode,
     bookmarked: &HashSet<String>,
     nicknames: &HashMap<String, String>,
+    selected_count: Option<usize>,
 ) {
     let size = f.area();
     let outer = Layout::default()
@@ -303,7 +336,7 @@ fn ui(
         .split(outer[1]);
 
     render_list(f, columns[0], sessions, state, bookmarked, nicknames);
-    render_preview(f, columns[1], sessions, state, nicknames);
+    render_preview(f, columns[1], sessions, state, nicknames, selected_count);
 
     let footer = match mode {
         Mode::Filter => Span::styled(
@@ -422,6 +455,7 @@ fn render_preview(
     sessions: &[&Session],
     state: &ListState,
     nicknames: &HashMap<String, String>,
+    selected_count: Option<usize>,
 ) {
     let block = Block::default().borders(Borders::ALL).title(" Preview ");
     let inner = block.inner(area);
@@ -467,7 +501,7 @@ fn render_preview(
         Line::from(vec![
             dim("msgs:   "),
             Span::raw(
-                s.message_count
+                selected_count
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "…".into()),
             ),
@@ -793,5 +827,24 @@ mod tests {
         let empty: Vec<&Session> = Vec::new();
         move_sel(&mut state, &empty, 1);
         assert_eq!(state.selected(), None);
+    }
+
+    #[test]
+    fn lazy_count_fills_from_all_turns_once() {
+        // exact_count_for is a pure helper over a cache + a closure that yields turns.
+        let mut cache: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let calls = std::cell::Cell::new(0);
+        let yield_turns = || {
+            calls.set(calls.get() + 1);
+            3usize
+        };
+        let a = exact_count_for(&mut cache, "id1", Some(5), yield_turns);
+        assert_eq!(a, 5); // Some(n) short-circuits, closure not called
+        assert_eq!(calls.get(), 0);
+        let b = exact_count_for(&mut cache, "id2", None, yield_turns);
+        assert_eq!(b, 3);
+        let c = exact_count_for(&mut cache, "id2", None, yield_turns);
+        assert_eq!(c, 3);
+        assert_eq!(calls.get(), 1); // cached on second call
     }
 }
