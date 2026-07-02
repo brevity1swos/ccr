@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-07-02
+
+### Bug Fixes
+
+- *(live-check)* Match session id only as a resume argument
+
+### Features
+
+- *(cli)* Add resume <id> subcommand to resume without the picker
+
+
 ## [0.2.3] - 2026-06-19
 
 ### Bug Fixes
