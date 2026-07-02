@@ -55,9 +55,10 @@ Top row is **nicknamed** — `panic hotfix` shows in yellow, the auto-derived
 last-message title stays visible underneath in dim gray. Rows without a
 nickname are two lines (tags + auto-title), the same as before.
 
-If a selected session is already running elsewhere (detected via
-`pgrep -f <session-id>`), a confirmation modal appears before spawning a
-second attachment:
+If a selected session is already running elsewhere (detected via `pgrep`,
+matching only processes that carry the id as a resume argument —
+`--resume <id>` / `-r <id>` / `resume <id>`), a confirmation modal appears before spawning
+a second attachment:
 
 ```
         ┌─ Confirm resume ──────────────────────────────────────┐
@@ -111,20 +112,31 @@ ccr
 
 [agx]: https://github.com/brevity1swos/agx
 
-On `Enter`, `ccr` runs `pgrep -f <session-id>` first. If a matching process is
-found, a confirmation modal warns before spawning a second attachment (which
-would interleave JSONL writes and corrupt the session). Otherwise it execs the
+On `Enter`, `ccr` runs a live-check first: `pgrep` prefilters processes that
+mention the id, then only those carrying it as a resume argument
+(`--resume <id>` / `-r <id>` / `resume <id>`, fused `--resume=<id>` too) count as live — an editor or
+`tail -f` with the session file open does not. If a match is found, a
+confirmation modal warns before spawning a second attachment (which would
+interleave JSONL writes and corrupt the session). Otherwise it execs the
 tool's resume command with the session's original `cwd`.
 
 ## CLI subcommands
 
 | Command              | Action                                                 |
 |----------------------|--------------------------------------------------------|
+| `ccr resume <id>`    | resume a session directly by id, skipping the picker (`--force` to override the live-session guard) |
 | `ccr list`           | plain-text dump of all sessions (tool id date title)   |
 | `ccr path <id>`      | absolute path to session file (pipes well)             |
 | `ccr show <id>`      | raw file contents (same as `cat $(ccr path <id>)`)     |
 | `ccr export <id>`    | full-turn markdown dump (or `--format json`)           |
 | `ccr stats`          | totals, per-tool, per-project, 30-day activity histogram |
+
+`ccr resume <id>` runs the same live-check as the TUI: if the session looks
+like it is already open elsewhere (a process carries the id as a resume
+argument) it refuses, since a second attachment interleaves JSONL writes and
+corrupts the session. Pass `--force` to resume anyway. The id is any id from
+`ccr list`. On success the resumed tool's exit code is propagated; a refusal
+or any error exits 1.
 
 `ccr` never modifies your session files. If you want to delete one, delete
 it where its tool stored it (`~/.claude/projects/...`, `~/.codex/sessions/...`,
@@ -176,7 +188,7 @@ pub trait Backend: Send + Sync {
     fn all_turns(&self, s: &Session) -> Result<Vec<Turn>>;  // for ccr export
 
     // Optional override with a useful default:
-    fn running(&self, s: &Session) -> Vec<String>;   // default: pgrep -f <id>
+    fn running(&self, s: &Session) -> Vec<String>;   // default: id-as-resume-arg pgrep match
 }
 ```
 

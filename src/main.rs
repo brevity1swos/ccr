@@ -9,7 +9,7 @@ mod tail;
 mod tui;
 mod util;
 
-use backends::{all, by_name, scan_all};
+use backends::{Backend, all, by_name, scan_all};
 use session::{Role, Session, Turn};
 use tui::{AppAction, run};
 use util::truncate;
@@ -29,6 +29,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Resume a session directly by id, skipping the picker
+    /// (the CLI equivalent of selecting it in the TUI).
+    Resume {
+        /// Session id.
+        id: String,
+        /// Resume even if the session appears to be running elsewhere.
+        #[arg(short, long)]
+        force: bool,
+    },
     /// List all sessions as plain text (tool id date title).
     List,
     /// Print the absolute path to a session's on-disk file.
@@ -58,6 +67,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         None => launch_picker(),
+        Some(Command::Resume { id, force }) => run_resume(&id, force),
         Some(Command::List) => run_list(),
         Some(Command::Path { id }) => run_path(&id),
         Some(Command::Show { id }) => run_show(&id),
@@ -68,10 +78,7 @@ fn main() -> Result<()> {
 
 fn find_session_by_id(id: &str) -> Result<Session> {
     let backends = all();
-    scan_all(&backends)
-        .into_iter()
-        .find(|s| s.id == id)
-        .with_context(|| format!("no session with id `{id}`"))
+    find_session_and_backend(&backends, id).map(|(_, session)| session)
 }
 
 fn run_path(id: &str) -> Result<()> {
@@ -88,14 +95,49 @@ fn run_show(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_export(id: &str, format: ExportFormat) -> Result<()> {
-    let backends = all();
-    let session = scan_all(&backends)
+/// Resolve a session id to its owning backend and parsed session, scanning every
+/// store. Shared by `resume` and `export`, which both need the backend handle.
+fn find_session_and_backend<'a>(
+    backends: &'a [Box<dyn Backend>],
+    id: &str,
+) -> Result<(&'a dyn Backend, Session)> {
+    let session = scan_all(backends)
         .into_iter()
         .find(|s| s.id == id)
         .with_context(|| format!("no session with id `{id}`"))?;
-    let backend = by_name(&backends, session.backend)
+    let backend = by_name(backends, session.backend)
         .with_context(|| format!("unknown backend `{}`", session.backend))?;
+    Ok((backend, session))
+}
+
+/// Resume a session by id without the picker. Refuses a session that looks live
+/// (another process has it open) unless `force`, mirroring the TUI's confirm
+/// modal — a second attachment interleaves JSONL writes and corrupts the session.
+fn run_resume(id: &str, force: bool) -> Result<()> {
+    let backends = all();
+    let (backend, session) = find_session_and_backend(&backends, id)?;
+    if !force {
+        let running = backend.running(&session);
+        if !running.is_empty() {
+            eprintln!("ccr: session {id} may already be running:");
+            for p in &running {
+                eprintln!("  {p}");
+            }
+            eprintln!("Resuming may interleave writes and corrupt the session.");
+            eprintln!("Re-run with `--force` to resume anyway.");
+            std::process::exit(1);
+        }
+    }
+    let status = backend
+        .resume(&session)
+        .status()
+        .with_context(|| format!("failed to spawn `{}` — is it on PATH?", session.backend))?;
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+fn run_export(id: &str, format: ExportFormat) -> Result<()> {
+    let backends = all();
+    let (backend, session) = find_session_and_backend(&backends, id)?;
     let turns = backend.all_turns(&session)?;
     match format {
         ExportFormat::Md => print!("{}", format_md(&session, &turns)),
@@ -315,7 +357,42 @@ fn run_list() -> Result<()> {
 mod tests {
     use super::*;
     use chrono::Local;
+    use clap::Parser;
     use std::path::PathBuf;
+
+    #[test]
+    fn cli_parses_resume_subcommand() {
+        let cli = Cli::try_parse_from(["ccr", "resume", "abc-123"]).unwrap();
+        match cli.command {
+            Some(Command::Resume { id, force }) => {
+                assert_eq!(id, "abc-123");
+                assert!(!force);
+            }
+            _ => panic!("expected resume subcommand"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_resume_force_flag() {
+        for args in [
+            ["ccr", "resume", "--force", "abc"],
+            ["ccr", "resume", "-f", "abc"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            match cli.command {
+                Some(Command::Resume { id, force }) => {
+                    assert_eq!(id, "abc");
+                    assert!(force);
+                }
+                _ => panic!("expected resume subcommand"),
+            }
+        }
+    }
+
+    #[test]
+    fn cli_resume_requires_id() {
+        assert!(Cli::try_parse_from(["ccr", "resume"]).is_err());
+    }
 
     fn sample_session() -> Session {
         Session {
