@@ -698,7 +698,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         k("● live", "modified < 5 min ago — may be running"),
         Line::from(""),
         Line::from(Span::styled(
-            "On Enter, ccr runs `pgrep -f <id>` and prompts if a",
+            "On Enter, ccr checks for a live `--resume <id>`",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(Span::styled(

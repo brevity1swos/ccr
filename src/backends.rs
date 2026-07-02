@@ -4,7 +4,7 @@ use std::process::Command;
 use rayon::prelude::*;
 
 use crate::session::{Session, Turn};
-use crate::util::pgrep_f;
+use crate::util::pgrep_session;
 
 pub mod claude;
 pub mod codex;
@@ -28,10 +28,11 @@ pub trait Backend: Send + Sync {
 
     /// `pid cmdline` strings for processes that appear to be attached to this
     /// session. Empty if none. Used to warn before resuming a live session.
-    /// Default scans `pgrep -af <session-id>`; override when the tool's CLI
-    /// does not embed the session ID in its argv.
+    /// Default matches processes carrying the id as a resume argument
+    /// (`--resume <id>` / `-r <id>` / `resume <id>`); override when the tool's CLI does not
+    /// embed the session ID in its resume argv (e.g. Gemini's index-based resume).
     fn running(&self, s: &Session) -> Vec<String> {
-        pgrep_f(&s.id)
+        pgrep_session(&s.id)
     }
 
     /// All user + assistant turns from the session, in chronological order.

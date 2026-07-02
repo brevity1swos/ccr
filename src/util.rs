@@ -45,11 +45,36 @@ pub fn is_possibly_live(last_activity: DateTime<Local>) -> bool {
         < LIVE_WINDOW_SECS
 }
 
-/// `pgrep -af <pattern>` filtered to exclude our own PID and any `ccr` processes.
-/// Returns `pid cmdline` strings. Empty on non-Unix or no match.
-pub fn pgrep_f(pattern: &str) -> Vec<String> {
+/// Resume flag / subcommand tokens that a live attach places directly before the
+/// session id: `claude --resume <id>` / `claude -r <id>` / `codex resume <id>`.
+const RESUME_FLAGS: [&str; 3] = ["--resume", "-r", "resume"];
+
+/// pgrep flags that print `PID full-cmdline` lines, which differ by platform:
+/// procps (Linux) uses `-a` for "list full command line", but BSD/macOS `-a`
+/// means "include process ancestors" and prints bare PIDs — there, `-l`
+/// combined with `-f` prints the full argument list instead. Using the wrong
+/// form silently disables the live-session guard (bare-PID lines carry no
+/// argv for [`line_resumes_session`] to match).
+#[cfg(target_os = "linux")]
+const PGREP_LIST_ARGS: [&str; 1] = ["-af"];
+#[cfg(not(target_os = "linux"))]
+const PGREP_LIST_ARGS: [&str; 1] = ["-fl"];
+
+/// Processes that appear to be *resuming this exact session*.
+///
+/// A pgrep prefilter (platform flags: [`PGREP_LIST_ARGS`]) is refined to only
+/// the lines where the id is the
+/// argument of a resume flag/subcommand (`--resume <id>`, `-r <id>`,
+/// `resume <id>`, or the fused `--resume=<id>` form). A bare substring match is
+/// not enough — that would flag any process that merely mentions the id: an
+/// editor with `<id>.jsonl` open, `tail -f …/<id>.jsonl`, another `ccr`
+/// subcommand, or a shell line that names it. Returns `pid cmdline` strings.
+/// Empty on non-Unix or no match.
+pub fn pgrep_session(id: &str) -> Vec<String> {
     let own_pid = std::process::id().to_string();
-    let Ok(out) = Command::new("pgrep").args(["-af", pattern]).output() else {
+    let mut args: Vec<&str> = PGREP_LIST_ARGS.to_vec();
+    args.push(id);
+    let Ok(out) = Command::new("pgrep").args(&args).output() else {
         return Vec::new();
     };
     if !out.status.success() {
@@ -57,14 +82,64 @@ pub fn pgrep_f(pattern: &str) -> Vec<String> {
     }
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter(|l| {
-            let mut parts = l.split_whitespace();
-            let pid = parts.next().unwrap_or("");
-            let cmd = parts.next().unwrap_or("");
-            pid != own_pid && cmd != "ccr" && !cmd.ends_with("/ccr")
-        })
-        .map(String::from)
+        .map(sanitize_line)
+        .filter(|l| line_resumes_session(l, id, &own_pid))
         .collect()
+}
+
+/// Replace control bytes — and Unicode bidi controls, which reorder rendered
+/// text — with spaces. pgrep output embeds other processes' argv verbatim;
+/// argv is attacker-controlled on shared hosts, and these lines are re-printed
+/// to the user's terminal (the `ccr resume` refusal message and the TUI
+/// confirm modal), so neither ESC/CSI bytes nor visual-spoofing overrides may
+/// pass through.
+fn sanitize_line(line: &str) -> String {
+    line.chars()
+        .map(|c| {
+            let bidi = matches!(
+                c,
+                '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            );
+            if c.is_control() || bidi { ' ' } else { c }
+        })
+        .collect()
+}
+
+/// True when a `PID full-cmdline` pgrep line (`<pid> <arg0> <arg1> …`) is a live attach to
+/// `id`: not our own PID, not a `ccr` process, and carries the id as a resume
+/// argument. Split out from [`pgrep_session`] so the matching logic is testable
+/// without spawning `pgrep`.
+fn line_resumes_session(line: &str, id: &str, own_pid: &str) -> bool {
+    let mut parts = line.split_whitespace();
+    let Some(pid) = parts.next() else {
+        return false;
+    };
+    if pid == own_pid {
+        return false;
+    }
+    let Some(prog) = parts.next() else {
+        return false;
+    };
+    // Never flag ccr's own processes (this picker, `ccr resume`, `ccr export`, …).
+    if prog == "ccr" || prog.ends_with("/ccr") {
+        return false;
+    }
+    let args: Vec<&str> = parts.collect();
+    resume_arg_present(&args, id)
+}
+
+/// True when `id` appears in `args` as the value of a resume flag — either the
+/// separate form (`--resume <id>`) or the fused form (`--resume=<id>`).
+fn resume_arg_present(args: &[&str], id: &str) -> bool {
+    args.iter().enumerate().any(|(i, tok)| {
+        if let Some((flag, val)) = tok.split_once('=')
+            && RESUME_FLAGS.contains(&flag)
+            && val == id
+        {
+            return true;
+        }
+        *tok == id && i > 0 && RESUME_FLAGS.contains(&args[i - 1])
+    })
 }
 
 /// File modification time as `DateTime<Local>`, or the unix epoch when the
@@ -155,8 +230,162 @@ mod tests {
     }
 
     #[test]
-    fn pgrep_f_returns_empty_for_improbable_pattern() {
-        assert!(pgrep_f("!!!definitely-not-a-real-process-pattern-xyz!!!").is_empty());
+    fn pgrep_session_returns_empty_for_improbable_pattern() {
+        assert!(pgrep_session("!!!definitely-not-a-real-process-pattern-xyz!!!").is_empty());
+    }
+
+    const ID: &str = "abc-123";
+
+    #[test]
+    fn matches_claude_and_codex_resume_argv() {
+        assert!(line_resumes_session(
+            &format!("42318 claude --resume {ID}"),
+            ID,
+            "1"
+        ));
+        assert!(line_resumes_session(
+            &format!("42318 claude -r {ID}"),
+            ID,
+            "1"
+        ));
+        assert!(line_resumes_session(
+            &format!("42318 /usr/bin/codex resume {ID}"),
+            ID,
+            "1"
+        ));
+        assert!(line_resumes_session(
+            &format!("42318 claude --resume={ID}"),
+            ID,
+            "1"
+        ));
+    }
+
+    #[test]
+    fn ignores_bare_mentions_of_the_id() {
+        // editor / tail with the session file open — id is a substring of the
+        // filename token, not a resume argument
+        assert!(!line_resumes_session(
+            &format!("42318 nvim /home/me/.claude/projects/x/{ID}.jsonl"),
+            ID,
+            "1"
+        ));
+        assert!(!line_resumes_session(
+            &format!("42318 tail -f /x/{ID}.jsonl"),
+            ID,
+            "1"
+        ));
+        // a shell line that names the id but is not resuming it
+        assert!(!line_resumes_session(
+            &format!("42318 grep {ID} log.txt"),
+            ID,
+            "1"
+        ));
+    }
+
+    #[test]
+    fn ignores_own_pid_and_ccr_processes() {
+        assert!(!line_resumes_session(
+            &format!("77 claude --resume {ID}"),
+            ID,
+            "77"
+        ));
+        assert!(!line_resumes_session(
+            &format!("42318 ccr resume {ID}"),
+            ID,
+            "1"
+        ));
+        assert!(!line_resumes_session(
+            &format!("42318 /opt/bin/ccr resume {ID}"),
+            ID,
+            "1"
+        ));
+    }
+
+    #[test]
+    fn resume_arg_present_requires_flag_before_id() {
+        assert!(resume_arg_present(&["--resume", ID], ID));
+        assert!(resume_arg_present(&["resume", ID], ID));
+        assert!(resume_arg_present(&["--resume=abc-123"], ID));
+        assert!(!resume_arg_present(&[ID], ID)); // id with no preceding flag
+        assert!(!resume_arg_present(&["--other", ID], ID));
+        assert!(!resume_arg_present(&["--resume", "other-id"], ID));
+    }
+
+    #[test]
+    fn fused_short_and_bare_forms_match() {
+        assert!(resume_arg_present(&["-r=abc-123"], ID));
+        assert!(resume_arg_present(&["resume=abc-123"], ID));
+        assert!(!resume_arg_present(&["-r=other-id"], ID));
+    }
+
+    // These false positives are ACCEPTED by design: the matcher deliberately
+    // ignores the program name (node-shim installs run as `node …/cli.js
+    // --resume <id>`), so any process with a resume-shaped token pair is
+    // flagged. The failure direction is safe — a spurious refusal that
+    // `--force` (CLI) or the confirm modal (TUI) overrides — whereas requiring
+    // known program names would silently miss real attaches.
+    #[test]
+    fn accepted_false_positives_are_documented() {
+        // `grep -r <id> <dir>`: "-r" happens to be a resume flag token.
+        assert!(line_resumes_session(
+            &format!("42318 grep -r {ID} /var/log"),
+            ID,
+            "1"
+        ));
+        // pgrep space-joins argv without quoting, so a single text argument
+        // *containing* "--resume <id>" tokenizes into a phantom flag+id pair.
+        assert!(line_resumes_session(
+            &format!("42318 claude -p why does --resume {ID} hang"),
+            ID,
+            "1"
+        ));
+    }
+
+    #[test]
+    fn sanitize_line_replaces_control_bytes() {
+        assert_eq!(
+            sanitize_line("42 claude --resume \x1b[2Jabc\x07"),
+            "42 claude --resume  [2Jabc "
+        );
+        assert_eq!(
+            sanitize_line("42 claude --resume abc"),
+            "42 claude --resume abc"
+        );
+    }
+
+    /// Platform-shape guard: pgrep must emit `PID cmdline` lines on THIS
+    /// platform or the live-session guard is silently dead (the macOS
+    /// `pgrep -af` bare-PID regression). Spawns a real decoy process carrying
+    /// `--resume <unique-id>` in its argv and asserts pgrep_session sees it.
+    /// Requires a working pgrep + readable process table (GH-hosted runners
+    /// have both; slim container images without procps would fail here — by
+    /// design, since the guard is equally dead there).
+    #[test]
+    #[cfg(unix)]
+    fn live_check_detects_synthetic_resume_process() {
+        let id = format!("ccr-live-check-test-{}", std::process::id());
+        // "; :" keeps this a compound command — a single command would be
+        // exec'd directly by sh, replacing the argv that carries `--resume`.
+        let mut decoy = Command::new("sh")
+            .args(["-c", "sleep 30; :", "decoy-argv0", "--resume", &id])
+            .spawn()
+            .expect("spawn decoy");
+        // pgrep needs the process visible; poll briefly instead of one sleep.
+        let mut found = Vec::new();
+        for _ in 0..25 {
+            found = pgrep_session(&id);
+            if !found.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        decoy.kill().ok();
+        decoy.wait().ok();
+        assert!(
+            !found.is_empty(),
+            "pgrep_session must detect a live `--resume {id}` process on this platform \
+             (wrong pgrep output shape? see PGREP_LIST_ARGS)"
+        );
     }
 
     #[test]
