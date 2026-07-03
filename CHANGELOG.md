@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-07-03
+
+### Features
+
+- *(search)* Full-history `/` content search via background warm-up
+
+
 ## [0.2.4] - 2026-07-02
 
 ### Bug Fixes
