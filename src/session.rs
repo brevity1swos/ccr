@@ -9,8 +9,14 @@ pub const LIVE_WINDOW_SECS: i64 = 300;
 /// the window.
 pub const PLACEHOLDER_TITLE: &str = "(no user message)";
 /// Max bytes of lowercase turn text retained per session for `/` content
-/// filtering. After the tail-read scan this covers the recent (tail-window)
-/// turns, not the full history — full-content search is a deferred follow-up.
+/// filtering. Applies to both tiers of searchable text: the tail-window
+/// `Session.searchable` built during scan (recent turns, available instantly)
+/// and the full-history text the TUI's background warm-up adds alongside it
+/// (`tui::warm_search_cache`); the filter checks both. The cap keeps the
+/// oldest turns of the full text and the newest turns of the tail text, so a
+/// conversation longer than the cap normally stays searchable at both ends
+/// with only its middle falling out (in the extreme case of more than the cap
+/// inside the tail window alone, the newest text can fall out too).
 pub const SEARCHABLE_CAP: usize = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,11 +59,13 @@ pub struct Session {
     pub preview: Vec<Turn>,
     pub possibly_live: bool,
     /// Absolute path to the on-disk file this session was parsed from.
-    /// Used by `Backend::trash` to move the file without rescanning.
+    /// Used to re-read the session (`all_turns_at`, export, search warm-up)
+    /// without rescanning.
     pub origin: PathBuf,
-    /// All turn text across the session, lowercased, newline-joined, capped
-    /// at `SEARCHABLE_CAP` bytes. Populated by backends during scan; used
-    /// by the TUI's `/` filter for full-content search.
+    /// Turn text from the scan's tail window, lowercased, newline-joined,
+    /// capped at `SEARCHABLE_CAP` bytes. The TUI's `/` filter always checks
+    /// this alongside the warmed full-history text (which is capped from the
+    /// oldest turn, so this covers the newest).
     pub searchable: String,
 }
 

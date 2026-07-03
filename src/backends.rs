@@ -3,8 +3,9 @@ use std::process::Command;
 
 use rayon::prelude::*;
 
-use crate::session::{Session, Turn};
+use crate::session::{Session, Turn, append_searchable};
 use crate::util::pgrep_session;
+use std::path::Path;
 
 pub mod claude;
 pub mod codex;
@@ -35,10 +36,34 @@ pub trait Backend: Send + Sync {
         pgrep_session(&s.id)
     }
 
-    /// All user + assistant turns from the session, in chronological order.
-    /// Re-reads the origin file (not capped like `Session.preview`). Used by
-    /// `ccr export` to produce complete markdown / JSON dumps.
-    fn all_turns(&self, s: &Session) -> Result<Vec<Turn>>;
+    /// All user + assistant turns from the session file at `origin`, in
+    /// chronological order. Re-reads the file (not capped like
+    /// `Session.preview`). Used by `ccr export` and the full-history search
+    /// warm-up; takes a bare path so background threads need no `Session`.
+    fn all_turns_at(&self, origin: &Path) -> Result<Vec<Turn>>;
+
+    /// Convenience wrapper over [`Backend::all_turns_at`].
+    fn all_turns(&self, s: &Session) -> Result<Vec<Turn>> {
+        self.all_turns_at(&s.origin)
+    }
+}
+
+/// Full-history searchable text for one session file: every user + assistant
+/// turn, lowercased and capped exactly like the tail-window `Session.searchable`
+/// built during scan. Empty when the file is unreadable — callers should then
+/// fall back to the scan-time text rather than caching the empty result.
+///
+/// Reads and parses the whole file even when the cap binds sooner; a streaming
+/// early-exit would need a different `all_turns_at` contract and isn't worth it
+/// for a background warm-up.
+pub fn full_searchable(backend: &dyn Backend, origin: &Path) -> String {
+    let mut buf = String::new();
+    if let Ok(turns) = backend.all_turns_at(origin) {
+        for t in &turns {
+            append_searchable(&mut buf, &t.text);
+        }
+    }
+    buf
 }
 
 pub fn all() -> Vec<Box<dyn Backend>> {

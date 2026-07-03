@@ -13,10 +13,15 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
-use crate::backends::{Backend, by_name};
+use crate::backends::{Backend, all, by_name, full_searchable};
 use crate::bookmarks;
 use crate::nicknames;
 use crate::session::{Role, Session};
@@ -59,6 +64,50 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// id → full-history searchable text, shared between the TUI loop (reads)
+/// and the warm-up thread (writes).
+type SearchCache = Arc<RwLock<HashMap<String, String>>>;
+
+/// Read every session's full conversation text into `cache` (id → lowercased,
+/// capped searchable). Runs on a background thread right after TUI startup so
+/// `/` searches full history without slowing the tail-window scan; sessions
+/// the warm-up hasn't reached yet fall back to their scan-time `searchable`.
+/// Empty results (unreadable file, no turns) are not cached so the fallback
+/// keeps working for them.
+/// Warm-up reads whole files; don't fan that out to every core the way the
+/// (cheap) tail-window scan does — a 64-core NFS login node would otherwise
+/// issue 64 concurrent full-file reads for a background nicety.
+const WARM_THREADS_MAX: usize = 8;
+
+fn warm_search_cache(
+    work: Vec<(String, &'static str, PathBuf)>,
+    cache: &SearchCache,
+    cancel: &AtomicBool,
+) {
+    let backends = all();
+    let warm_one = |(id, backend_name, origin): (String, &'static str, PathBuf)| {
+        if cancel.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(b) = by_name(&backends, backend_name) else {
+            return;
+        };
+        let full = full_searchable(b, &origin);
+        if !full.is_empty()
+            && let Ok(mut map) = cache.write()
+        {
+            map.insert(id, full);
+        }
+    };
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(rayon::current_num_threads().min(WARM_THREADS_MAX))
+        .build()
+    {
+        Ok(pool) => pool.install(|| work.into_par_iter().for_each(warm_one)),
+        Err(_) => work.into_par_iter().for_each(warm_one),
+    }
+}
+
 pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppAction> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -77,11 +126,52 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
     let mut nicknames: HashMap<String, String> = nicknames::load();
     let mut count_cache: HashMap<String, usize> = HashMap::new();
 
-    let result = loop {
-        let visible: Vec<&Session> = sessions
+    let search_cache: SearchCache = Arc::new(RwLock::new(HashMap::new()));
+    let warming = Arc::new(AtomicBool::new(true));
+    let cancel_warm = Arc::new(AtomicBool::new(false));
+    {
+        let work: Vec<(String, &'static str, PathBuf)> = sessions
             .iter()
-            .filter(|s| matches_filter(s, &filter, &nicknames))
+            .map(|s| (s.id.clone(), s.backend, s.origin.clone()))
             .collect();
+        let cache = Arc::clone(&search_cache);
+        let warming = Arc::clone(&warming);
+        let cancel = Arc::clone(&cancel_warm);
+        std::thread::spawn(move || {
+            // Clear `warming` even if a worker panic unwinds out of rayon —
+            // otherwise the UI would stay on the 250ms tick forever.
+            struct ClearOnDrop(Arc<AtomicBool>);
+            impl Drop for ClearOnDrop {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+            let _clear = ClearOnDrop(warming);
+            warm_search_cache(work, &cache, &cancel);
+        });
+    }
+
+    let result = loop {
+        // Snapshot BEFORE building `visible`: if the warm-up finishes after
+        // this frame's cache read, the snapshot still gates one more tick, so
+        // the next frame is built from the completed cache before the loop
+        // returns to blocking reads.
+        let was_warming = warming.load(Ordering::Acquire);
+        let visible: Vec<&Session> = {
+            // One read lock per frame; writers (warm-up threads) interleave
+            // between frames.
+            let cache = search_cache.read().ok();
+            sessions
+                .iter()
+                .filter(|s| {
+                    let full = cache
+                        .as_ref()
+                        .and_then(|m| m.get(&s.id))
+                        .map(String::as_str);
+                    matches_filter(s, &filter, &nicknames, full)
+                })
+                .collect()
+        };
         match state.selected() {
             Some(sel) if sel >= visible.len() => state.select(if visible.is_empty() {
                 None
@@ -115,6 +205,11 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
             )
         })?;
 
+        // While the warm-up runs, tick every 250ms so `/` results repaint as
+        // the cache fills; afterwards block on input as before.
+        if was_warming && !event::poll(Duration::from_millis(250))? {
+            continue;
+        }
         let Event::Key(key) = event::read()? else {
             continue;
         };
@@ -239,10 +334,23 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
         }
     };
 
+    // Every exit path (quit, resume, view) stops the background warm-up —
+    // the resumed child shouldn't inherit full-store reads (NFS especially).
+    cancel_warm.store(true, Ordering::Release);
     Ok(result)
 }
 
-fn matches_filter(s: &Session, filter: &str, nicknames: &HashMap<String, String>) -> bool {
+/// `full_text` is the warmed full-history searchable for this session when
+/// available. It EXTENDS the scan-time tail-window `s.searchable` rather than
+/// replacing it: for conversations longer than `SEARCHABLE_CAP` the full text
+/// is capped from the start (oldest turns kept) while `s.searchable` holds the
+/// newest turns — checking both keeps recent matches working on long sessions.
+fn matches_filter(
+    s: &Session,
+    filter: &str,
+    nicknames: &HashMap<String, String>,
+    full_text: Option<&str>,
+) -> bool {
     if filter.is_empty() {
         return true;
     }
@@ -250,6 +358,7 @@ fn matches_filter(s: &Session, filter: &str, nicknames: &HashMap<String, String>
     s.title.to_lowercase().contains(&needle)
         || s.cwd.to_string_lossy().to_lowercase().contains(&needle)
         || s.backend.to_lowercase().contains(&needle)
+        || full_text.is_some_and(|t| t.contains(&needle))
         || s.searchable.contains(&needle)
         || nicknames
             .get(&s.id)
@@ -744,7 +853,8 @@ mod tests {
         assert!(matches_filter(
             &sess("hello", "/x", "claude"),
             "",
-            &no_nicknames()
+            &no_nicknames(),
+            None
         ));
     }
 
@@ -753,12 +863,14 @@ mod tests {
         assert!(matches_filter(
             &sess("Hello World", "/x", "claude"),
             "HELLO",
-            &no_nicknames()
+            &no_nicknames(),
+            None
         ));
         assert!(matches_filter(
             &sess("hello world", "/x", "claude"),
             "Hello",
-            &no_nicknames()
+            &no_nicknames(),
+            None
         ));
     }
 
@@ -767,7 +879,8 @@ mod tests {
         assert!(matches_filter(
             &sess("x", "/home/me/proj", "claude"),
             "proj",
-            &no_nicknames()
+            &no_nicknames(),
+            None
         ));
     }
 
@@ -776,7 +889,8 @@ mod tests {
         assert!(matches_filter(
             &sess("x", "/y", "claude"),
             "claud",
-            &no_nicknames()
+            &no_nicknames(),
+            None
         ));
     }
 
@@ -785,17 +899,97 @@ mod tests {
         assert!(!matches_filter(
             &sess("hello", "/y", "claude"),
             "xyz",
-            &no_nicknames()
+            &no_nicknames(),
+            None
         ));
+    }
+
+    #[test]
+    fn full_text_extends_recent_searchable() {
+        let mut s = sess("title", "/x", "claude");
+        s.searchable = "recent turns only".into();
+        // Needle lives only in the warmed full history.
+        assert!(!matches_filter(&s, "ancient", &no_nicknames(), None));
+        assert!(matches_filter(
+            &s,
+            "ancient",
+            &no_nicknames(),
+            Some("an ancient needle from turn one")
+        ));
+        // The tail-window text still matches WITH a cache entry present — on
+        // >cap conversations the full text is oldest-turns-only, so recent
+        // matches must keep coming from s.searchable.
+        assert!(matches_filter(
+            &s,
+            "recent",
+            &no_nicknames(),
+            Some("an ancient needle from turn one")
+        ));
+        // And with no cache entry at all.
+        assert!(matches_filter(&s, "recent", &no_nicknames(), None));
+    }
+
+    #[test]
+    fn warm_search_cache_fills_from_session_files() {
+        use std::io::Write;
+        let mut path = std::env::temp_dir();
+        path.push(format!("ccr-warm-cache-{}.jsonl", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","cwd":"/p","timestamp":"2026-04-19T10:00:00Z","message":{{"content":"WarmNeedle in history"}}}}"#
+        )
+        .unwrap();
+        drop(f);
+        let cache: SearchCache = Arc::new(RwLock::new(HashMap::new()));
+        let cancel = AtomicBool::new(false);
+        warm_search_cache(
+            vec![("sess-1".into(), "claude", path.clone())],
+            &cache,
+            &cancel,
+        );
+        let map = cache.read().unwrap();
+        // Lowercased by append_searchable, keyed by session id.
+        assert!(map.get("sess-1").unwrap().contains("warmneedle in history"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn warm_search_cache_skips_unreadable_and_cancelled() {
+        let cache: SearchCache = Arc::new(RwLock::new(HashMap::new()));
+        // Unreadable file → empty result → NOT cached (tail fallback keeps
+        // working for that session).
+        warm_search_cache(
+            vec![("gone".into(), "claude", PathBuf::from("/no/such/file"))],
+            &cache,
+            &AtomicBool::new(false),
+        );
+        assert!(cache.read().unwrap().is_empty());
+        // Cancelled before start → nothing is read or cached.
+        let mut real = std::env::temp_dir();
+        real.push(format!("ccr-warm-cancel-{}.jsonl", std::process::id()));
+        std::fs::write(&real, "{}").ok();
+        warm_search_cache(
+            vec![("c1".into(), "claude", real.clone())],
+            &cache,
+            &AtomicBool::new(true),
+        );
+        assert!(cache.read().unwrap().is_empty());
+        std::fs::remove_file(&real).ok();
     }
 
     #[test]
     fn filter_matches_full_turn_content() {
         let mut s = sess("unrelated title", "/x", "claude");
         s.searchable = "the panic came from a race on ccr_trash_dir".into();
-        assert!(matches_filter(&s, "race", &no_nicknames()));
-        assert!(matches_filter(&s, "CCR_TRASH_DIR", &no_nicknames()));
-        assert!(!matches_filter(&s, "nonexistentword", &no_nicknames()));
+        assert!(matches_filter(&s, "race", &no_nicknames(), None));
+        assert!(matches_filter(&s, "CCR_TRASH_DIR", &no_nicknames(), None));
+        assert!(!matches_filter(
+            &s,
+            "nonexistentword",
+            &no_nicknames(),
+            None
+        ));
     }
 
     #[test]
@@ -803,9 +997,9 @@ mod tests {
         let s = sess("last user message", "/x", "claude");
         let mut nicks = HashMap::new();
         nicks.insert("x".into(), "auth refactor sprint".into());
-        assert!(matches_filter(&s, "auth", &nicks));
-        assert!(matches_filter(&s, "SPRINT", &nicks)); // case-insensitive
-        assert!(!matches_filter(&s, "xyz", &nicks));
+        assert!(matches_filter(&s, "auth", &nicks, None));
+        assert!(matches_filter(&s, "SPRINT", &nicks, None)); // case-insensitive
+        assert!(!matches_filter(&s, "xyz", &nicks, None));
     }
 
     #[test]

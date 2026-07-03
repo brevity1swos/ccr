@@ -57,9 +57,8 @@ impl Backend for CodexBackend {
         cmd
     }
 
-    fn all_turns(&self, s: &Session) -> Result<Vec<Turn>> {
-        let file =
-            fs::File::open(&s.origin).with_context(|| format!("open {}", s.origin.display()))?;
+    fn all_turns_at(&self, origin: &Path) -> Result<Vec<Turn>> {
+        let file = fs::File::open(origin).with_context(|| format!("open {}", origin.display()))?;
         let reader = BufReader::new(file);
         let mut turns = Vec::new();
         for line in reader.lines() {

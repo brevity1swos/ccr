@@ -102,7 +102,7 @@ ccr
 | `g` / `Home`| jump to top                             |
 | `G` / `End` | jump to bottom                          |
 | `PgUp/Dn`   | page up/down (10 rows)                  |
-| `/`         | filter: title, cwd, tool, nickname, or content (recent turns only) |
+| `/`         | filter: title, cwd, tool, nickname, or full-history content |
 | `Enter`     | resume selected session (live-checked)  |
 | `v`         | open session in [agx] (timeline viewer) |
 | `b`         | toggle bookmark (★ marker, persisted)   |
@@ -111,6 +111,11 @@ ccr
 | `q` / `Esc` | quit                                    |
 
 [agx]: https://github.com/brevity1swos/agx
+
+`/` content search covers each session's **full history**: the conversation
+text is indexed by a background thread right after startup (the picker itself
+still opens instantly from the tail-window scan), so for the first moments a
+content match may cover only recent turns, filling in as the index completes.
 
 On `Enter`, `ccr` runs a live-check first: `pgrep` prefilters processes that
 mention the id, then only those carrying it as a resume argument

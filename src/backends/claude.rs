@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Cursor};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rayon::prelude::*;
@@ -71,9 +71,8 @@ impl Backend for ClaudeBackend {
         cmd
     }
 
-    fn all_turns(&self, s: &Session) -> Result<Vec<Turn>> {
-        let file =
-            fs::File::open(&s.origin).with_context(|| format!("open {}", s.origin.display()))?;
+    fn all_turns_at(&self, origin: &Path) -> Result<Vec<Turn>> {
+        let file = fs::File::open(origin).with_context(|| format!("open {}", origin.display()))?;
         let reader = BufReader::new(file);
         let mut turns = Vec::new();
         for line in reader.lines() {
@@ -330,6 +329,38 @@ mod tests {
         assert!(s.title.starts_with("msg "));
         assert_eq!(s.message_count, None); // tail window => count not computed
         assert_eq!(s.preview.len(), PREVIEW_TURNS);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn full_searchable_covers_turns_beyond_tail_window() {
+        use std::io::Write;
+        let mut path = std::env::temp_dir();
+        path.push(format!("ccr-full-searchable-{}.jsonl", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        // First message carries the needle; ~75KB of filler pushes it beyond
+        // the 64KB initial tail window (title resolves in that window, so the
+        // scan never grows it back to the file start).
+        writeln!(
+            f,
+            r#"{{"type":"user","cwd":"/p","timestamp":"2026-04-19T10:00:00Z","message":{{"content":"earlyneedle77 from the very first turn"}}}}"#
+        )
+        .unwrap();
+        for i in 0..500 {
+            writeln!(
+                f,
+                r#"{{"type":"user","cwd":"/p","timestamp":"2026-04-19T10:00:00Z","message":{{"content":"filler message number {i} padding padding padding padding padding padding"}}}}"#
+            )
+            .unwrap();
+        }
+        let s = scan_one(&path).expect("session");
+        assert!(
+            !s.searchable.contains("earlyneedle77"),
+            "tail-window searchable unexpectedly reached the file start — grow the filler"
+        );
+        let full = crate::backends::full_searchable(&ClaudeBackend, &path);
+        assert!(full.contains("earlyneedle77"));
+        assert!(full.contains("filler message number 0"));
         std::fs::remove_file(&path).ok();
     }
 

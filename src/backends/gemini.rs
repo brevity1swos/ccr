@@ -118,9 +118,9 @@ impl Backend for GeminiBackend {
         Vec::new()
     }
 
-    fn all_turns(&self, s: &Session) -> Result<Vec<Turn>> {
-        let content = fs::read_to_string(&s.origin)
-            .with_context(|| format!("read {}", s.origin.display()))?;
+    fn all_turns_at(&self, origin: &Path) -> Result<Vec<Turn>> {
+        let content =
+            fs::read_to_string(origin).with_context(|| format!("read {}", origin.display()))?;
         let Ok(v) = serde_json::from_str::<Value>(&content) else {
             return Ok(Vec::new());
         };
