@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-07-06
+
+### Bug Fixes
+
+- *(claude)* Resume from the launch cwd, not the latest recorded cwd
+
+
 ## [0.2.5] - 2026-07-03
 
 ### Features
