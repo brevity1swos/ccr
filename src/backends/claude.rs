@@ -67,7 +67,8 @@ impl Backend for ClaudeBackend {
 
     fn resume(&self, s: &Session) -> Command {
         let mut cmd = Command::new("claude");
-        cmd.arg("--resume").arg(&s.id).current_dir(&s.cwd);
+        let cwd = launch_cwd(&s.origin).unwrap_or_else(|| s.cwd.clone());
+        cmd.arg("--resume").arg(&s.id).current_dir(cwd);
         cmd
     }
 
@@ -97,6 +98,32 @@ impl Backend for ClaudeBackend {
         }
         Ok(turns)
     }
+}
+
+/// How much of the file head to search for the launch cwd. The first records
+/// of a session carry it; the bound keeps resume snappy on huge files.
+const LAUNCH_CWD_WINDOW: u64 = 256 * 1024;
+
+/// First `cwd` recorded in the session file — the directory the session was
+/// launched from. Claude Code stores the file under that directory's encoding
+/// in `projects/`, and `claude --resume <id>` only searches the store slot for
+/// the current working directory, so resume must run from the launch cwd.
+/// `Session.cwd` is not that: it comes from the tail window, which reports the
+/// *latest* cwd when a session changed directory mid-conversation.
+fn launch_cwd(origin: &Path) -> Option<PathBuf> {
+    use std::io::Read;
+    let file = fs::File::open(origin).ok()?;
+    let reader = BufReader::new(file.take(LAUNCH_CWD_WINDOW));
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(c) = v.get("cwd").and_then(|c| c.as_str()) {
+            return Some(PathBuf::from(c));
+        }
+    }
+    None
 }
 
 /// Parse one Claude session from a bounded tail window, growing the window
@@ -362,6 +389,59 @@ mod tests {
         assert!(full.contains("earlyneedle77"));
         assert!(full.contains("filler message number 0"));
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn resume_runs_from_launch_cwd_not_latest_cwd() {
+        use std::io::Write;
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "ccr-resume-launch-cwd-{}.jsonl",
+            std::process::id()
+        ));
+        let mut f = std::fs::File::create(&path).unwrap();
+        // Session launched at /launch/root, then cd'd to a subdirectory.
+        // ~75KB of filler pushes the first record beyond the 64KB tail window,
+        // so the scan only ever sees the post-cd cwd.
+        writeln!(
+            f,
+            r#"{{"type":"user","cwd":"/launch/root","timestamp":"2026-04-19T10:00:00Z","message":{{"content":"start"}}}}"#
+        )
+        .unwrap();
+        for i in 0..500 {
+            writeln!(
+                f,
+                r#"{{"type":"user","cwd":"/launch/root/sub","timestamp":"2026-04-19T10:00:01Z","message":{{"content":"filler message number {i} padding padding padding padding padding padding"}}}}"#
+            )
+            .unwrap();
+        }
+        let s = scan_one(&path).expect("session");
+        assert_eq!(
+            s.cwd,
+            PathBuf::from("/launch/root/sub"),
+            "tail-window scan should report the latest cwd — grow the filler if not"
+        );
+        let cmd = ClaudeBackend.resume(&s);
+        assert_eq!(
+            cmd.get_current_dir(),
+            Some(Path::new("/launch/root")),
+            "resume must run from the launch cwd or `claude --resume` won't find the session"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn resume_falls_back_to_session_cwd_when_origin_unreadable() {
+        let jsonl = r#"{"type":"user","cwd":"/proj","timestamp":"2026-04-19T10:00:00Z","message":{"content":"hi"}}
+"#;
+        let s = parse_session_from_reader(
+            "abc-123",
+            PathBuf::from("/nonexistent/origin.jsonl"),
+            Cursor::new(jsonl),
+        )
+        .unwrap();
+        let cmd = ClaudeBackend.resume(&s);
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/proj")));
     }
 
     #[test]
