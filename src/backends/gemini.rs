@@ -83,7 +83,10 @@ impl Backend for GeminiBackend {
             for f in fs::read_dir(&chats)? {
                 let f = f?;
                 let p = f.path();
-                if p.extension().and_then(|e| e.to_str()) != Some("json") {
+                if !matches!(
+                    p.extension().and_then(|e| e.to_str()),
+                    Some("json" | "jsonl")
+                ) {
                     continue;
                 }
                 work.push((p, cwd.clone()));
@@ -121,9 +124,7 @@ impl Backend for GeminiBackend {
     fn all_turns_at(&self, origin: &Path) -> Result<Vec<Turn>> {
         let content =
             fs::read_to_string(origin).with_context(|| format!("read {}", origin.display()))?;
-        let Ok(v) = serde_json::from_str::<Value>(&content) else {
-            return Ok(Vec::new());
-        };
+        let v = parse_conversation(&content);
         let messages = v
             .get("messages")
             .and_then(|m| m.as_array())
@@ -159,9 +160,7 @@ pub(crate) fn parse_session_from_json(
     cwd: PathBuf,
     origin: PathBuf,
 ) -> Result<Option<Session>> {
-    let Ok(v) = serde_json::from_str::<Value>(content) else {
-        return Ok(None);
-    };
+    let v = parse_conversation(content);
     let Some(id) = v
         .get("sessionId")
         .and_then(|i| i.as_str())
@@ -226,6 +225,90 @@ pub(crate) fn parse_session_from_json(
     }))
 }
 
+/// Read legacy JSON snapshots or replay Gemini's append-only JSONL records.
+/// Replacements keep their position; rewinds discard the target and later turns.
+/// Ignore malformed records, including a partially written final line.
+fn parse_conversation(content: &str) -> Value {
+    if let Ok(snapshot) = serde_json::from_str::<Value>(content) {
+        return snapshot;
+    }
+
+    let mut metadata = serde_json::Map::new();
+    let mut messages: Vec<Value> = Vec::new();
+    for line in content.lines() {
+        let Ok(Value::Object(record)) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(id) = record.get("$rewindTo").and_then(Value::as_str) {
+            let index = messages.iter().position(|m| m["id"] == id).unwrap_or(0);
+            messages.truncate(index);
+        } else if let Some(patch) = record.get("$patch").and_then(Value::as_object) {
+            patch_message(&mut messages, patch);
+            if let Some(updates) = patch.get("updates").and_then(Value::as_array) {
+                for update in updates.iter().filter_map(Value::as_object) {
+                    patch_message(&mut messages, update);
+                }
+            }
+            if let Some(ids) = patch.get("removeIds").and_then(Value::as_array) {
+                messages.retain(|m| !ids.contains(&m["id"]));
+            }
+            if let Some(ids) = patch.get("orderIds").and_then(Value::as_array) {
+                // Unmentioned messages stay at the front, followed by the listed IDs.
+                let mut ordered = Vec::new();
+                for id in ids.iter().filter(|id| id.is_string()) {
+                    if let Some(index) = messages.iter().position(|m| &m["id"] == id) {
+                        ordered.push(messages.remove(index));
+                    }
+                }
+                messages.extend(ordered);
+            }
+        } else if record.get("id").is_some_and(Value::is_string)
+            && record.get("type").is_some_and(Value::is_string)
+        {
+            upsert_message(&mut messages, Value::Object(record));
+        } else {
+            let update = record.get("$set").and_then(Value::as_object);
+            let fields = update.unwrap_or(&record);
+            if let Some(snapshot) = fields.get("messages").and_then(Value::as_array) {
+                if update.is_some() {
+                    messages.clear();
+                }
+                for message in snapshot {
+                    upsert_message(&mut messages, message.clone());
+                }
+            }
+            metadata.extend(fields.clone());
+        }
+    }
+    metadata.insert("messages".into(), Value::Array(messages));
+    Value::Object(metadata)
+}
+
+fn upsert_message(messages: &mut Vec<Value>, message: Value) {
+    let Some(id) = message.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    if !message.get("type").is_some_and(Value::is_string) {
+        return;
+    }
+    if let Some(existing) = messages.iter_mut().find(|m| m["id"] == id) {
+        *existing = message;
+    } else {
+        messages.push(message);
+    }
+}
+
+fn patch_message(messages: &mut [Value], patch: &serde_json::Map<String, Value>) {
+    let Some(id) = patch.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    if let Some(content) = patch.get("content")
+        && let Some(message) = messages.iter_mut().find(|m| m["id"] == id)
+    {
+        message["content"] = content.clone();
+    }
+}
+
 fn extract_gemini_text(content: &Value) -> String {
     match content {
         Value::Array(arr) => arr
@@ -285,5 +368,67 @@ mod tests {
         let s = parse(json).expect("session");
         assert_eq!(s.title, "real");
         assert_eq!(s.message_count, Some(1));
+    }
+
+    #[test]
+    fn jsonl_replays_replacements_patches_and_metadata() {
+        let jsonl = r#"{"sessionId":"jsonl-id","startTime":"2026-10-17T10:00:00Z"}
+{"id":"u1","type":"user","content":[{"text":"first prompt"}]}
+{"id":"a1","type":"gemini","content":"partial"}
+{"id":"a1","type":"gemini","content":"complete"}
+{"$patch":{"id":"u1","content":[{"text":"edited prompt"}]}}
+{"$set":{"lastUpdated":"2026-10-17T11:00:00Z"}}
+{"id":"incomplete"
+"#;
+        let s = parse(jsonl).unwrap();
+        assert_eq!(s.id, "jsonl-id");
+        assert_eq!(s.title, "edited prompt");
+        assert_eq!(s.message_count, Some(2));
+        assert_eq!(s.preview[1].text, "complete");
+        assert!(!s.searchable.contains("partial"));
+        assert_eq!(s.last_activity.timestamp(), 1792234800);
+    }
+
+    #[test]
+    fn jsonl_replays_batch_edits_removals_order_and_rewinds() {
+        let jsonl = r#"{"sessionId":"jsonl-id"}
+{"id":"u1","type":"user","content":"one"}
+{"id":"u2","type":"user","content":"two"}
+{"id":"u3","type":"user","content":"three"}
+{"id":"a1","type":"gemini","content":"answer"}
+{"$patch":{"updates":[{"id":"u1","content":"edited"},{"id":"missing","content":"ignored"}],"removeIds":["u2"],"orderIds":["u3","a1","u1"]}}
+"#;
+        let s = parse(jsonl).unwrap();
+        assert_eq!(s.message_count, Some(3));
+        assert_eq!(s.preview[0].text, "three");
+        assert_eq!(s.preview[2].text, "edited");
+
+        let rewound = format!("{jsonl}{{\"$rewindTo\":\"a1\"}}\n");
+        let s = parse(&rewound).unwrap();
+        assert_eq!(s.message_count, Some(1));
+        assert_eq!(s.title, "three");
+        assert!(!s.searchable.contains("edited"));
+
+        let cleared = format!("{rewound}{{\"$rewindTo\":\"missing\"}}\n");
+        assert_eq!(parse(&cleared).unwrap().message_count, Some(0));
+    }
+
+    #[test]
+    fn jsonl_set_messages_replaces_history() {
+        let jsonl = r#"{"sessionId":"jsonl-id","messages":[{"id":"old","type":"user","content":"old history"}]}
+{"$set":{"messages":[{"id":"new","type":"user","content":"replacement history"}]}}
+{"id":"reply","type":"gemini","content":"new reply"}
+"#;
+        let s = parse(jsonl).unwrap();
+        assert_eq!(s.title, "replacement history");
+        assert_eq!(s.message_count, Some(2));
+        assert!(!s.searchable.contains("old history"));
+    }
+
+    #[test]
+    fn jsonl_without_session_metadata_is_ignored() {
+        assert!(
+            parse("{\"id\":\"u1\",\"type\":\"user\",\"content\":\"hello\"}\ninvalid\n").is_none()
+        );
     }
 }
