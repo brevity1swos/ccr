@@ -102,7 +102,7 @@ ccr
 | `g` / `Home`| jump to top                             |
 | `G` / `End` | jump to bottom                          |
 | `PgUp/Dn`   | page up/down (10 rows)                  |
-| `/`         | filter: title, cwd, tool, nickname, or full-history content |
+| `/`         | focus the search bar — space-separated keywords (all must match) across title, cwd, tool, nickname, or full-history content |
 | `Enter`     | resume selected session (live-checked)  |
 | `o` / `→`   | open in… — continue this conversation in another tool |
 | `y`         | yank last user prompt to the clipboard  |
@@ -134,10 +134,19 @@ tool, unchanged.
 
 [agx]: https://github.com/brevity1swos/agx
 
-`/` content search covers each session's **full history**: the conversation
+The search bar sits above the session list and is always visible: press `/`
+to focus it, type space-separated keywords, and the list narrows live — every
+keyword must match somewhere, each in any field, so `claude panic` finds
+Claude sessions about a panic and `codex api retry` keeps only Codex
+sessions mentioning both terms. `Enter` applies and returns to the list,
+`Esc` clears the query; pressing `/` again keeps the current query so it
+can be refined. The bar shows the match count while a query is active.
+
+Keyword search covers each session's **full history**: the conversation
 text is indexed by a background thread right after startup (the picker itself
 still opens instantly from the tail-window scan), so for the first moments a
-content match may cover only recent turns, filling in as the index completes.
+content match may cover only recent turns, filling in as the index completes
+(the search bar says so while it warms up).
 
 On `Enter`, `ccr` runs a live-check first: `pgrep` prefilters processes that
 mention the id, then only those carrying it as a resume argument
