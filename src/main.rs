@@ -14,6 +14,11 @@ use session::{Role, Session, Turn};
 use tui::{AppAction, run};
 use util::truncate;
 
+/// Soft cap (chars) on the cross-tool handoff prompt. Kept well under the
+/// smallest per-argument exec limit (Linux `MAX_ARG_STRLEN` = 128 KiB) so
+/// the transcript survives every supported platform's argv.
+const HANDOFF_PROMPT_MAX: usize = 48_000;
+
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
 enum ExportFormat {
     Md,
@@ -88,9 +93,9 @@ fn run_path(id: &str) -> Result<()> {
 }
 
 fn run_show(id: &str) -> Result<()> {
-    let s = find_session_by_id(id)?;
-    let content = std::fs::read_to_string(&s.origin)
-        .with_context(|| format!("read {}", s.origin.display()))?;
+    let backends = all();
+    let (backend, session) = find_session_and_backend(&backends, id)?;
+    let content = backend.show(&session)?;
     print!("{content}");
     Ok(())
 }
@@ -305,6 +310,50 @@ pub(crate) fn format_json(s: &Session, turns: &[Turn]) -> Result<String> {
     Ok(serde_json::to_string_pretty(&doc)?)
 }
 
+/// Build the "open in `<tool>`" handoff prompt: the full conversation of
+/// `source`, oldest first, framed so the receiving model continues it.
+/// When the transcript exceeds [`HANDOFF_PROMPT_MAX`] chars the OLDEST turns
+/// are dropped and a note says so — the newest context always travels.
+pub(crate) fn handoff_prompt(source: &Session, turns: &[Turn]) -> String {
+    let mut kept: Vec<&Turn> = Vec::with_capacity(turns.len());
+    let mut budget = HANDOFF_PROMPT_MAX;
+    for t in turns.iter().rev() {
+        let cost = t.text.chars().count() + 32; // label + padding allowance
+        if cost > budget {
+            break;
+        }
+        budget -= cost;
+        kept.push(t);
+    }
+    kept.reverse();
+    let dropped = turns.len() - kept.len();
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "You are continuing a conversation that was previously running in \
+         {} (working directory: {}). ",
+        source.backend,
+        source.cwd.display()
+    ));
+    out.push_str(
+        "The transcript below is the conversation so far, oldest \
+                  first. Continue where it left off.\n\n",
+    );
+    if dropped > 0 {
+        out.push_str(&format!(
+            "({dropped} oldest turns omitted to fit this prompt.)\n\n"
+        ));
+    }
+    for t in &kept {
+        let tag = match t.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        out.push_str(&format!("[{tag}]\n{}\n\n", t.text.trim()));
+    }
+    out
+}
+
 fn launch_picker() -> Result<()> {
     let backends = all();
     let sessions = scan_all(&backends);
@@ -324,6 +373,20 @@ fn launch_picker() -> Result<()> {
                 .resume(&s)
                 .status()
                 .with_context(|| format!("failed to spawn `{}` — is it on PATH?", s.backend))?;
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        AppAction::OpenIn { session, target } => {
+            // Read the full transcript via the OWNING backend; fall back to
+            // the scan-time preview if the re-read fails (file moved, etc).
+            let turns = by_name(&backends, session.backend)
+                .and_then(|b| b.all_turns(&session).ok())
+                .unwrap_or_else(|| session.preview.clone());
+            let prompt = handoff_prompt(&session, &turns);
+            let status = by_name(&backends, target)
+                .with_context(|| format!("unknown backend `{target}`"))?
+                .open_with_prompt(&session.cwd, &prompt)
+                .status()
+                .with_context(|| format!("failed to spawn `{target}` — is it on PATH?"))?;
             std::process::exit(status.code().unwrap_or(1));
         }
         AppAction::View(s) => {
@@ -491,5 +554,47 @@ mod tests {
         assert!(out.contains("codex"));
         assert!(out.contains("alpha"));
         assert!(out.contains("beta"));
+    }
+
+    #[test]
+    fn handoff_prompt_labels_roles_and_keeps_order() {
+        let s = sample_session();
+        let turns = sample_turns();
+        let p = handoff_prompt(&s, &turns);
+        assert!(p.contains("previously running in claude"));
+        assert!(p.contains("/proj"));
+        assert!(p.contains("oldest first"));
+        let u = p.find("[user]\nhello").expect("user turn labeled");
+        let a = p.find("[assistant]\nhi back").expect("assistant labeled");
+        assert!(u < a, "turns must stay chronological");
+        assert!(!p.contains("omitted"), "no truncation note on short input");
+    }
+
+    #[test]
+    fn handoff_prompt_drops_oldest_when_over_budget() {
+        let s = sample_session();
+        let big = "x".repeat(10_000);
+        let turns: Vec<Turn> = (0..10)
+            .map(|i| Turn {
+                role: if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                text: format!("turn{i} {big}"),
+            })
+            .collect();
+        let p = handoff_prompt(&s, &turns);
+        assert!(p.contains("omitted"), "must note the dropped turns");
+        assert!(p.contains("turn9"), "newest turn must survive");
+        assert!(!p.contains("turn0 "), "oldest turn must be dropped");
+        assert!(p.chars().count() < HANDOFF_PROMPT_MAX + 2_000);
+    }
+
+    #[test]
+    fn handoff_prompt_empty_turns_still_frames_context() {
+        let p = handoff_prompt(&sample_session(), &[]);
+        assert!(p.contains("previously running in claude"));
+        assert!(!p.contains("omitted"));
     }
 }

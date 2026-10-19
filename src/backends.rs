@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::process::Command;
 
 use rayon::prelude::*;
@@ -10,6 +10,7 @@ use std::path::Path;
 pub mod claude;
 pub mod codex;
 pub mod gemini;
+pub mod opencode;
 
 /// One supported CLI coding assistant. Implementations know how to list the
 /// tool's disk-backed sessions and how to resume one of them.
@@ -26,6 +27,13 @@ pub trait Backend: Send + Sync {
     /// Build (but do not spawn) the command that resumes the given session.
     /// The caller sets `cwd` expectations via `Command::current_dir`.
     fn resume(&self, s: &Session) -> Command;
+
+    /// Start a NEW session in this tool with `prompt` as its first user
+    /// message, launched from `cwd`. Backs the "open in `<tool>`" handoff:
+    /// a conversation from another tool is carried over as context. Unlike
+    /// [`Backend::resume`] this never reattaches to an existing session,
+    /// so no live-check applies.
+    fn open_with_prompt(&self, cwd: &Path, prompt: &str) -> Command;
 
     /// `pid cmdline` strings for processes that appear to be attached to this
     /// session. Empty if none. Used to warn before resuming a live session.
@@ -45,6 +53,13 @@ pub trait Backend: Send + Sync {
     /// Convenience wrapper over [`Backend::all_turns_at`].
     fn all_turns(&self, s: &Session) -> Result<Vec<Turn>> {
         self.all_turns_at(&s.origin)
+    }
+
+    /// Raw dump for `ccr show`. Default: the text file at `origin`. Override
+    /// when the store is not a plain per-session file (e.g. OpenCode's
+    /// shared SQLite db, whose binary bytes must not hit the terminal).
+    fn show(&self, s: &Session) -> Result<String> {
+        std::fs::read_to_string(&s.origin).with_context(|| format!("read {}", s.origin.display()))
     }
 }
 
@@ -71,6 +86,7 @@ pub fn all() -> Vec<Box<dyn Backend>> {
         Box::new(claude::ClaudeBackend),
         Box::new(codex::CodexBackend),
         Box::new(gemini::GeminiBackend),
+        Box::new(opencode::OpencodeBackend),
     ]
 }
 
