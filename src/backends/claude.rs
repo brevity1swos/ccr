@@ -72,6 +72,12 @@ impl Backend for ClaudeBackend {
         cmd
     }
 
+    fn open_with_prompt(&self, cwd: &Path, prompt: &str) -> Command {
+        let mut cmd = Command::new("claude");
+        cmd.arg(prompt).current_dir(cwd);
+        cmd
+    }
+
     fn all_turns_at(&self, origin: &Path) -> Result<Vec<Turn>> {
         let file = fs::File::open(origin).with_context(|| format!("open {}", origin.display()))?;
         let reader = BufReader::new(file);
@@ -441,6 +447,14 @@ mod tests {
         )
         .unwrap();
         let cmd = ClaudeBackend.resume(&s);
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/proj")));
+    }
+
+    #[test]
+    fn open_with_prompt_passes_prompt_positionally() {
+        let cmd = ClaudeBackend.open_with_prompt(Path::new("/proj"), "continue this");
+        assert_eq!(cmd.get_program(), "claude");
+        assert_eq!(cmd.get_args().collect::<Vec<_>>(), vec!["continue this"]);
         assert_eq!(cmd.get_current_dir(), Some(Path::new("/proj")));
     }
 

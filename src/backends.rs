@@ -28,6 +28,13 @@ pub trait Backend: Send + Sync {
     /// The caller sets `cwd` expectations via `Command::current_dir`.
     fn resume(&self, s: &Session) -> Command;
 
+    /// Start a NEW session in this tool with `prompt` as its first user
+    /// message, launched from `cwd`. Backs the "open in `<tool>`" handoff:
+    /// a conversation from another tool is carried over as context. Unlike
+    /// [`Backend::resume`] this never reattaches to an existing session,
+    /// so no live-check applies.
+    fn open_with_prompt(&self, cwd: &Path, prompt: &str) -> Command;
+
     /// `pid cmdline` strings for processes that appear to be attached to this
     /// session. Empty if none. Used to warn before resuming a live session.
     /// Default matches processes carrying the id as a resume argument

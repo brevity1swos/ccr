@@ -1,6 +1,8 @@
+use anyhow::{Result, bail};
 use chrono::{DateTime, Local, TimeZone, Utc};
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::session::LIVE_WINDOW_SECS;
 
@@ -160,6 +162,48 @@ pub fn file_mtime(path: &Path) -> DateTime<Local> {
         Ok(t) => DateTime::<Utc>::from(t).with_timezone(&Local),
         Err(_) => Local.timestamp_opt(0, 0).unwrap(),
     }
+}
+
+/// Clipboard helpers tried in order, with the extra args each needs to read
+/// the clipboard's text from stdin. macOS ships `pbcopy`; Linux desktops
+/// have `wl-copy` (Wayland) or `xclip`/`xsel` (X11).
+#[cfg(target_os = "macos")]
+const CLIPBOARD_HELPERS: [(&str, &[&str]); 1] = [("pbcopy", &[])];
+#[cfg(not(target_os = "macos"))]
+const CLIPBOARD_HELPERS: [(&str, &[&str]); 3] = [
+    ("wl-copy", &[]),
+    ("xclip", &["-selection", "clipboard"]),
+    ("xsel", &["--clipboard", "--input"]),
+];
+
+/// Copy `text` to the system clipboard via the first helper found on PATH,
+/// returning the helper's name for status display. Fails when no helper is
+/// installed (or every helper exits nonzero).
+pub fn copy_to_clipboard(text: &str) -> Result<String> {
+    for (prog, args) in CLIPBOARD_HELPERS {
+        let Ok(mut child) = Command::new(prog)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue; // not on PATH — try the next helper
+        };
+        // Close stdin after writing so the helper sees EOF and flushes.
+        let wrote = child
+            .stdin
+            .take()
+            .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+        if wrote
+            && let Ok(status) = child.wait()
+            && status.success()
+        {
+            return Ok(prog.to_string());
+        }
+    }
+    let tried: Vec<&str> = CLIPBOARD_HELPERS.iter().map(|(p, _)| *p).collect();
+    bail!("no clipboard helper on PATH (tried {})", tried.join(", "));
 }
 
 #[cfg(test)]

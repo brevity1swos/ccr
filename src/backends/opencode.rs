@@ -72,6 +72,12 @@ impl Backend for OpencodeBackend {
         cmd
     }
 
+    fn open_with_prompt(&self, cwd: &Path, prompt: &str) -> Command {
+        let mut cmd = Command::new("opencode");
+        cmd.arg("--prompt").arg(prompt).current_dir(cwd);
+        cmd
+    }
+
     /// The default guard looks for `--resume`-style argv, which OpenCode
     /// never uses; match its `--session` / `-s` forms instead. Sessions
     /// opened from inside the OpenCode TUI carry no id in argv and stay
@@ -638,6 +644,17 @@ mod tests {
         assert_eq!(
             cmd.get_args().collect::<Vec<_>>(),
             vec!["--session", "ses_r"]
+        );
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/proj")));
+    }
+
+    #[test]
+    fn open_with_prompt_uses_prompt_flag() {
+        let cmd = OpencodeBackend.open_with_prompt(Path::new("/proj"), "continue this");
+        assert_eq!(cmd.get_program(), "opencode");
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            vec!["--prompt", "continue this"]
         );
         assert_eq!(cmd.get_current_dir(), Some(Path::new("/proj")));
     }
