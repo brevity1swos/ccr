@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossterm::{
     cursor::Show as ShowCursor,
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -38,6 +38,12 @@ fn dim<S: Into<std::borrow::Cow<'static, str>>>(s: S) -> Span<'static> {
 
 pub enum AppAction {
     Resume(Session),
+    /// Start a NEW session in `target` seeded with the source conversation
+    /// (the "open in `<tool>`" handoff).
+    OpenIn {
+        session: Session,
+        target: &'static str,
+    },
     View(Session),
     Quit,
 }
@@ -45,9 +51,32 @@ pub enum AppAction {
 enum Mode {
     List,
     Filter,
-    Confirm { session: Session, pids: Vec<String> },
+    Confirm {
+        session: Session,
+        pids: Vec<String>,
+    },
     Help,
-    NicknameInput { session_id: String, buf: String },
+    NicknameInput {
+        session_id: String,
+        buf: String,
+    },
+    /// "Open in …" picker: carry the selected conversation into a different
+    /// tool as a fresh, context-seeded session.
+    OpenIn {
+        session: Session,
+        targets: Vec<&'static str>,
+        sel: usize,
+    },
+}
+
+/// Backend names a session could be handed off to — every registered
+/// backend except the one that owns it.
+fn openin_targets(backends: &[Box<dyn Backend>], own: &str) -> Vec<&'static str> {
+    backends
+        .iter()
+        .map(|b| b.name())
+        .filter(|n| *n != own)
+        .collect()
 }
 
 struct TerminalGuard;
@@ -55,12 +84,7 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-            ShowCursor
-        );
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, ShowCursor);
     }
 }
 
@@ -111,7 +135,10 @@ fn warm_search_cache(
 pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppAction> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // No mouse capture: ccr never reads mouse events, and capturing them
+    // disables the terminal's native click-drag text selection — being able
+    // to select and copy text out of the picker matters more.
+    execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let _guard = TerminalGuard;
@@ -125,6 +152,9 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
     let mut bookmarked: HashSet<String> = bookmarks::load();
     let mut nicknames: HashMap<String, String> = nicknames::load();
     let mut count_cache: HashMap<String, usize> = HashMap::new();
+    // One-line feedback for transient actions (e.g. "yanked prompt via
+    // pbcopy"), shown in the footer until the next key press.
+    let mut status: Option<String> = None;
 
     let search_cache: SearchCache = Arc::new(RwLock::new(HashMap::new()));
     let warming = Arc::new(AtomicBool::new(true));
@@ -202,6 +232,8 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
                 &bookmarked,
                 &nicknames,
                 selected_count,
+                status.as_deref(),
+                was_warming,
             )
         })?;
 
@@ -216,6 +248,8 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        // Status feedback lasts exactly one key press.
+        status = None;
 
         match &mode {
             Mode::Filter => match key.code {
@@ -271,11 +305,55 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
                     _ => {}
                 }
             }
+            Mode::OpenIn {
+                session,
+                targets,
+                sel,
+            } => {
+                let session = session.clone();
+                let targets = targets.clone();
+                let mut sel = *sel;
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left | KeyCode::Char('h') => {
+                        mode = Mode::List;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        sel = sel.saturating_sub(1);
+                        mode = Mode::OpenIn {
+                            session,
+                            targets,
+                            sel,
+                        };
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        sel = (sel + 1).min(targets.len().saturating_sub(1));
+                        mode = Mode::OpenIn {
+                            session,
+                            targets,
+                            sel,
+                        };
+                    }
+                    KeyCode::Enter => {
+                        if let Some(&target) = targets.get(sel) {
+                            break AppAction::OpenIn { session, target };
+                        }
+                        mode = Mode::List;
+                    }
+                    _ => {
+                        mode = Mode::OpenIn {
+                            session,
+                            targets,
+                            sel,
+                        };
+                    }
+                }
+            }
             Mode::List => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => break AppAction::Quit,
                 KeyCode::Char('/') => {
+                    // Focus the search bar, keeping any existing query so it
+                    // can be refined; Esc clears it.
                     mode = Mode::Filter;
-                    filter.clear();
                 }
                 KeyCode::Char('?') | KeyCode::F(1) => mode = Mode::Help,
                 KeyCode::Down | KeyCode::Char('j') => move_sel(&mut state, &visible, 1),
@@ -313,6 +391,44 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
                         break AppAction::View((*s).clone());
                     }
                 }
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    if let Some(sel) = state.selected()
+                        && let Some(s) = visible.get(sel)
+                    {
+                        // Yank the last user prompt (the title's source) —
+                        // full text, not the 80-char truncated title.
+                        let text = s
+                            .preview
+                            .iter()
+                            .rev()
+                            .find(|t| t.role == Role::User)
+                            .map(|t| t.text.clone())
+                            .unwrap_or_else(|| s.title.clone());
+                        status = match crate::util::copy_to_clipboard(&text) {
+                            Ok(helper) => Some(format!(
+                                " yanked last prompt via {helper} ({} chars)",
+                                text.chars().count()
+                            )),
+                            Err(e) => Some(format!(" yank failed: {e}")),
+                        };
+                    }
+                }
+                KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Right | KeyCode::Char('l') => {
+                    if let Some(sel) = state.selected()
+                        && let Some(s) = visible.get(sel)
+                    {
+                        let targets = openin_targets(backends, s.backend);
+                        if targets.is_empty() {
+                            status = Some(" no other tool to open this in".into());
+                        } else {
+                            mode = Mode::OpenIn {
+                                session: (**s).clone(),
+                                targets,
+                                sel: 0,
+                            };
+                        }
+                    }
+                }
                 KeyCode::Enter => {
                     if let Some(sel) = state.selected()
                         && let Some(s) = visible.get(sel)
@@ -345,24 +461,35 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
 /// replacing it: for conversations longer than `SEARCHABLE_CAP` the full text
 /// is capped from the start (oldest turns kept) while `s.searchable` holds the
 /// newest turns — checking both keeps recent matches working on long sessions.
+///
+/// The query is space-separated keywords; EVERY keyword must match somewhere
+/// (AND), each in any field — so `claude panic` finds claude sessions about a
+/// panic, and `codex api retry` narrows codex sessions mentioning both terms.
 fn matches_filter(
     s: &Session,
     filter: &str,
     nicknames: &HashMap<String, String>,
     full_text: Option<&str>,
 ) -> bool {
-    if filter.is_empty() {
+    let keywords: Vec<String> = filter
+        .split_whitespace()
+        .map(|k| k.to_lowercase())
+        .collect();
+    if keywords.is_empty() {
         return true;
     }
-    let needle = filter.to_lowercase();
-    s.title.to_lowercase().contains(&needle)
-        || s.cwd.to_string_lossy().to_lowercase().contains(&needle)
-        || s.backend.to_lowercase().contains(&needle)
-        || full_text.is_some_and(|t| t.contains(&needle))
-        || s.searchable.contains(&needle)
-        || nicknames
-            .get(&s.id)
-            .is_some_and(|n| n.to_lowercase().contains(&needle))
+    let title = s.title.to_lowercase();
+    let cwd = s.cwd.to_string_lossy().to_lowercase();
+    let tool = s.backend.to_lowercase();
+    let nick = nicknames.get(&s.id).map(|n| n.to_lowercase());
+    keywords.iter().all(|k| {
+        title.contains(k)
+            || cwd.contains(k)
+            || tool.contains(k)
+            || s.searchable.contains(k)
+            || full_text.is_some_and(|t| t.contains(k))
+            || nick.as_deref().is_some_and(|n| n.contains(k))
+    })
 }
 
 fn move_sel(state: &mut ListState, visible: &[&Session], delta: i32) {
@@ -403,11 +530,14 @@ fn ui(
     bookmarked: &HashSet<String>,
     nicknames: &HashMap<String, String>,
     selected_count: Option<usize>,
+    status: Option<&str>,
+    indexing: bool,
 ) {
     let size = f.area();
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
@@ -416,19 +546,14 @@ fn ui(
 
     let live = sessions.iter().filter(|s| s.possibly_live).count();
     let header = format!(
-        " ccr — {} session{}  {}{}",
+        " ccr — {} session{}  {}",
         sessions.len(),
         if sessions.len() == 1 { "" } else { "s" },
         if live > 0 {
-            format!("({live} possibly live)  ")
+            format!("({live} possibly live)")
         } else {
             String::new()
         },
-        if filter.is_empty() {
-            String::new()
-        } else {
-            format!("[filter: {filter}]")
-        }
     );
     f.render_widget(
         Paragraph::new(header).style(
@@ -442,29 +567,45 @@ fn ui(
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(outer[1]);
+        .split(outer[2]);
 
+    render_search_bar(
+        f,
+        outer[1],
+        filter,
+        matches!(mode, Mode::Filter),
+        sessions.len(),
+        indexing,
+    );
     render_list(f, columns[0], sessions, state, bookmarked, nicknames);
     render_preview(f, columns[1], sessions, state, nicknames, selected_count);
 
-    let footer = match mode {
-        Mode::Filter => Span::styled(
-            format!(" / {filter}_  (Enter to apply, Esc to cancel) "),
-            Style::default().fg(Color::Yellow),
-        ),
-        Mode::Confirm { .. } => Span::styled(
-            " confirm: y = resume anyway · n/Esc = cancel ",
-            Style::default().fg(Color::Yellow),
-        ),
-        Mode::NicknameInput { .. } => Span::styled(
-            " n: set nickname  (Enter save · Esc cancel · empty = remove) ",
-            Style::default().fg(Color::Yellow),
-        ),
-        Mode::Help => Span::styled(" ? / Esc to close ", Style::default().fg(Color::DarkGray)),
-        Mode::List => Span::styled(
-            " Enter resume · v view · b bookmark · n nickname · / filter · ? help · q quit ",
-            Style::default().fg(Color::DarkGray),
-        ),
+    let footer = if let Some(status) = status {
+        Span::styled(format!(" {status} "), Style::default().fg(Color::Green))
+    } else {
+        match mode {
+            Mode::Filter => Span::styled(
+                " typing filters · Enter to apply · Esc to clear and exit ",
+                Style::default().fg(Color::Yellow),
+            ),
+            Mode::Confirm { .. } => Span::styled(
+                " confirm: y = resume anyway · n/Esc = cancel ",
+                Style::default().fg(Color::Yellow),
+            ),
+            Mode::NicknameInput { .. } => Span::styled(
+                " n: set nickname  (Enter save · Esc cancel · empty = remove) ",
+                Style::default().fg(Color::Yellow),
+            ),
+            Mode::OpenIn { .. } => Span::styled(
+                " open in: ↑/↓ choose · Enter open · Esc cancel ",
+                Style::default().fg(Color::Yellow),
+            ),
+            Mode::Help => Span::styled(" ? / Esc to close ", Style::default().fg(Color::DarkGray)),
+            Mode::List => Span::styled(
+                " Enter resume · o open in… · y yank prompt · b bookmark · n nickname · / search · ? help · q quit ",
+                Style::default().fg(Color::DarkGray),
+            ),
+        }
     };
     f.render_widget(Paragraph::new(Line::from(footer)), outer[2]);
 
@@ -472,8 +613,72 @@ fn ui(
         Mode::Confirm { session, pids } => render_confirm(f, size, session, pids),
         Mode::Help => render_help(f, size),
         Mode::NicknameInput { session_id, buf } => render_nickname_input(f, size, session_id, buf),
+        Mode::OpenIn {
+            session,
+            targets,
+            sel,
+        } => render_openin(f, size, session, targets, *sel),
         Mode::List | Mode::Filter => {}
     }
+}
+
+/// Always-visible query bar above the session list. Focused (via `/`) it
+/// takes keystrokes and shows a cursor; unfocused it keeps showing the
+/// active query so it's obvious why the list is filtered. Keywords are
+/// space-separated; every one must match.
+fn render_search_bar(
+    f: &mut Frame,
+    area: Rect,
+    filter: &str,
+    focused: bool,
+    matches: usize,
+    indexing: bool,
+) {
+    let bar_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let mut spans: Vec<Span> = vec![Span::styled(" / ", bar_style)];
+    if focused {
+        spans.push(Span::styled(
+            format!("{filter}_"),
+            Style::default().fg(Color::Yellow),
+        ));
+        spans.push(Span::styled(
+            "   (Enter apply · Esc clear)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else if filter.is_empty() {
+        spans.push(Span::styled(
+            "search prompts, projects, tools, content — keywords are ANDed",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        spans.push(Span::styled(
+            filter.to_string(),
+            Style::default().fg(Color::White),
+        ));
+        spans.push(Span::styled(
+            format!(
+                "   {matches} match{} ",
+                if matches == 1 { "" } else { "es" }
+            ),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    // While the background full-history warm-up is still running, content
+    // matches may be incomplete — say so instead of looking broken.
+    if indexing && !filter.is_empty() {
+        spans.push(Span::styled(
+            " · indexing full history…",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_list(
@@ -710,6 +915,62 @@ fn render_confirm(f: &mut Frame, area: Rect, session: &Session, pids: &[String])
     );
 }
 
+/// "Open in …" picker: hand the selected conversation to a different tool.
+/// The target starts a NEW session seeded with the transcript as its first
+/// prompt — no reattach, so no live-check is needed.
+fn render_openin(
+    f: &mut Frame,
+    area: Rect,
+    session: &Session,
+    targets: &[&'static str],
+    sel: usize,
+) {
+    let area = centered(area, 64, (targets.len() as u16 + 8).min(20));
+    f.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            "Open this conversation in…",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            dim("  from: "),
+            Span::raw(format!(
+                "[{}] {}",
+                session.backend,
+                truncate(&session.title, 40)
+            )),
+        ]),
+        Line::from(""),
+    ];
+
+    for (i, t) in targets.iter().enumerate() {
+        let marker = if i == sel { "▶ " } else { "  " };
+        let style = if i == sel {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(Span::styled(format!("{marker}{t}"), style)));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(dim(
+        "starts a NEW session there, seeded with the transcript",
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Open in… ")
+        .border_style(Style::default().fg(Color::Cyan));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 fn render_nickname_input(f: &mut Frame, area: Rect, session_id: &str, buf: &str) {
     let area = centered(area, 62, 8);
     f.render_widget(Clear, area);
@@ -756,7 +1017,7 @@ fn render_nickname_input(f: &mut Frame, area: Rect, session_id: &str, buf: &str)
 }
 
 fn render_help(f: &mut Frame, area: Rect) {
-    let area = centered(area, 70, 20);
+    let area = centered(area, 70, 27);
     f.render_widget(Clear, area);
 
     let k = |key: &'static str, desc: &'static str| -> Line<'static> {
@@ -789,6 +1050,11 @@ fn render_help(f: &mut Frame, area: Rect) {
         Line::from(""),
         section("Actions"),
         k("Enter", "resume selected session (with live-check)"),
+        k(
+            "o / →",
+            "open in… — continue this conversation in another tool",
+        ),
+        k("y", "yank last user prompt to the system clipboard"),
         k("v", "view session turns in agx (requires `agx` on PATH)"),
         k(
             "b",
@@ -798,7 +1064,10 @@ fn render_help(f: &mut Frame, area: Rect) {
             "n",
             "set nickname — shown in yellow instead of last message",
         ),
-        k("/", "filter: title, cwd, tool, nickname, or content"),
+        k(
+            "/",
+            "search — space-separated keywords, all must match; any field",
+        ),
         k("? / F1", "this help"),
         k("q / Esc", "quit"),
         Line::from(""),
@@ -807,11 +1076,15 @@ fn render_help(f: &mut Frame, area: Rect) {
         k("● live", "modified < 5 min ago — may be running"),
         Line::from(""),
         Line::from(Span::styled(
-            "On Enter, ccr checks for a live `--resume <id>`",
+            "Text is plain terminal output: select and copy",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(Span::styled(
-            "process is already attached to the session.",
+            "with your terminal's native selection. `open in…`",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "starts a fresh session seeded with the transcript.",
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -849,6 +1122,23 @@ mod tests {
     }
 
     #[test]
+    fn openin_targets_excludes_owning_backend() {
+        let backends = crate::backends::all();
+        let names: Vec<&str> = backends.iter().map(|b| b.name()).collect();
+        assert!(names.len() >= 2, "test assumes several registered backends");
+        for own in &names {
+            let targets = openin_targets(&backends, own);
+            assert!(!targets.is_empty());
+            assert!(!targets.contains(own));
+            for other in &names {
+                if other != own {
+                    assert!(targets.contains(other), "{other} missing for own={own}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn empty_filter_matches_everything() {
         assert!(matches_filter(
             &sess("hello", "/x", "claude"),
@@ -856,6 +1146,59 @@ mod tests {
             &no_nicknames(),
             None
         ));
+    }
+
+    #[test]
+    fn whitespace_only_query_matches_everything() {
+        assert!(matches_filter(
+            &sess("hello", "/x", "claude"),
+            "   ",
+            &no_nicknames(),
+            None
+        ));
+    }
+
+    #[test]
+    fn multi_keyword_requires_every_keyword() {
+        let s = sess("panic hotfix", "/proj", "claude");
+        assert!(matches_filter(&s, "panic hotfix", &no_nicknames(), None));
+        assert!(matches_filter(&s, "hotfix panic", &no_nicknames(), None));
+        assert!(!matches_filter(
+            &s,
+            "panic regression",
+            &no_nicknames(),
+            None
+        ));
+    }
+
+    #[test]
+    fn multi_keyword_matches_across_different_fields() {
+        // "claude" lives in the tool tag, "proj" in the cwd — both must hit.
+        let s = sess("unrelated title", "/home/me/proj", "claude");
+        assert!(matches_filter(&s, "claude proj", &no_nicknames(), None));
+        assert!(!matches_filter(&s, "codex proj", &no_nicknames(), None));
+    }
+
+    #[test]
+    fn keyword_can_match_via_full_history() {
+        let mut s = sess("t", "/x", "gemini");
+        s.searchable = "filler\nearlyneedle77 from turn one\nmore".into();
+        assert!(matches_filter(
+            &s,
+            "gemini earlyneedle77",
+            &no_nicknames(),
+            None
+        ));
+    }
+
+    #[test]
+    fn keyword_can_match_via_nickname() {
+        let mut nicks = no_nicknames();
+        nicks.insert("x".into(), "submission prep".into());
+        let s = sess("some title", "/x", "claude");
+        assert!(matches_filter(&s, "submission", &nicks, None));
+        assert!(matches_filter(&s, "claude submission", &nicks, None));
+        assert!(!matches_filter(&s, "submission codex", &nicks, None));
     }
 
     #[test]

@@ -63,6 +63,7 @@ impl Fixture {
             .env("CCR_CLAUDE_DIR", self.root.join("projects"))
             .env("CCR_CODEX_DIR", self.root.join("no-codex"))
             .env("CCR_GEMINI_DIR", self.root.join("no-gemini"))
+            .env("CCR_OPENCODE_DIR", self.root.join("no-opencode"))
             .env("PATH", path)
             .output()
             .expect("run ccr")
@@ -187,4 +188,87 @@ fn path_resolves_inside_fixture_store() {
     assert_eq!(out.status.code(), Some(0));
     let printed = String::from_utf8_lossy(&out.stdout);
     assert!(Path::new(printed.trim()).starts_with(&fx.root));
+}
+
+/// `ccr resume` on an OpenCode (SQLite) session must exec
+/// `opencode --session <id>` in the session's directory. Builds a fixture
+/// db and a fake `opencode` on PATH so nothing real is touched.
+#[test]
+fn resume_opencode_session_from_sqlite_store() {
+    use rusqlite::Connection;
+
+    let name = "opencode";
+    let root = std::env::temp_dir().join(format!("ccr-resume-cli-{name}-{}", std::process::id()));
+    fs::remove_dir_all(&root).ok();
+    let data = root.join("opencode-data");
+    let cwd = root.join("proj");
+    let bin = root.join("bin");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+
+    let id = format!("ses_ccr-e2e-{}", std::process::id());
+    {
+        let conn = Connection::open(data.join("opencode.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (
+                id text PRIMARY KEY, parent_id text, directory text NOT NULL,
+                time_archived integer, time_created integer NOT NULL,
+                time_updated integer NOT NULL
+             );
+             CREATE TABLE session_message (
+                id text PRIMARY KEY, session_id text NOT NULL, type text NOT NULL,
+                seq integer NOT NULL, time_created integer NOT NULL, data text NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_v2 (id, directory, time_created, time_updated) \
+             VALUES (?1, ?2, 0, 0)",
+            (&id, cwd.display().to_string()),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, seq, time_created, data) \
+             VALUES ('m1', ?1, 'user', 1, 0, '{\"text\":\"e2e opencode\"}')",
+            (&id,),
+        )
+        .unwrap();
+    }
+
+    let fake = bin.join("opencode");
+    std::fs::write(
+        &fake,
+        format!("#!/bin/sh\necho \"FAKE argv: $@\"\nexit {FAKE_EXIT}\n"),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_ccr"))
+        .args(["resume", &id])
+        .env("CCR_CLAUDE_DIR", root.join("no-claude"))
+        .env("CCR_CODEX_DIR", root.join("no-codex"))
+        .env("CCR_GEMINI_DIR", root.join("no-gemini"))
+        .env("CCR_OPENCODE_DIR", &data)
+        .env("PATH", path)
+        .output()
+        .expect("run ccr");
+
+    assert_eq!(
+        out.status.code(),
+        Some(FAKE_EXIT),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&format!("FAKE argv: --session {id}")));
+    fs::remove_dir_all(&root).ok();
 }

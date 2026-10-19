@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <strong>Supported:</strong> Claude Code · Codex · Gemini CLI
+  <strong>Supported:</strong> Claude Code · Codex · Gemini CLI · OpenCode
 </p>
 
 <p align="center">
@@ -102,20 +102,51 @@ ccr
 | `g` / `Home`| jump to top                             |
 | `G` / `End` | jump to bottom                          |
 | `PgUp/Dn`   | page up/down (10 rows)                  |
-| `/`         | filter: title, cwd, tool, nickname, or full-history content |
+| `/`         | focus the search bar — space-separated keywords (all must match) across title, cwd, tool, nickname, or full-history content |
 | `Enter`     | resume selected session (live-checked)  |
+| `o` / `→`   | open in… — continue this conversation in another tool |
+| `y`         | yank last user prompt to the clipboard  |
 | `v`         | open session in [agx] (timeline viewer) |
 | `b`         | toggle bookmark (★ marker, persisted)   |
 | `n`         | set / edit / clear session nickname (yellow label) |
 | `?` / `F1`  | help overlay                            |
 | `q` / `Esc` | quit                                    |
 
+`ccr` never captures the mouse, so click-drag text selection works with
+your terminal's native copy-paste anywhere in the picker. `y` is the
+shortcut for the common case: it copies the selected row's last user
+prompt (full text, not the truncated title) to the system clipboard via
+`pbcopy` / `wl-copy` / `xclip` / `xsel`.
+
+## Open in another tool
+
+Pick a session, press `o` (or `→`), and choose a different tool from the
+modal: ccr converts the full conversation into a prompt and launches that
+tool's CLI in the session's original working directory —
+`claude "<transcript>"`, `codex "<transcript>"`, `gemini "<transcript>"`,
+or `opencode --prompt "<transcript>"`. The receiving tool starts a **new**
+session that carries the old one's context, which is exactly what you want
+when a conversation has run out of road in one tool (or one model) and
+should continue in another. Transcripts longer than ~48k characters are
+trimmed from the oldest end (with a note saying so), so the prompt always
+fits every platform's argv limit. Enter still resumes in the original
+tool, unchanged.
+
 [agx]: https://github.com/brevity1swos/agx
 
-`/` content search covers each session's **full history**: the conversation
+The search bar sits above the session list and is always visible: press `/`
+to focus it, type space-separated keywords, and the list narrows live — every
+keyword must match somewhere, each in any field, so `claude panic` finds
+Claude sessions about a panic and `codex api retry` keeps only Codex
+sessions mentioning both terms. `Enter` applies and returns to the list,
+`Esc` clears the query; pressing `/` again keeps the current query so it
+can be refined. The bar shows the match count while a query is active.
+
+Keyword search covers each session's **full history**: the conversation
 text is indexed by a background thread right after startup (the picker itself
 still opens instantly from the tail-window scan), so for the first moments a
-content match may cover only recent turns, filling in as the index completes.
+content match may cover only recent turns, filling in as the index completes
+(the search bar says so while it warms up).
 
 On `Enter`, `ccr` runs a live-check first: `pgrep` prefilters processes that
 mention the id, then only those carrying it as a resume argument
@@ -145,7 +176,7 @@ or any error exits 1.
 
 `ccr` never modifies your session files. If you want to delete one, delete
 it where its tool stored it (`~/.claude/projects/...`, `~/.codex/sessions/...`,
-or `~/.gemini/tmp/...`).
+`~/.gemini/tmp/...`, or `~/.local/share/opencode/`).
 
 ## Environment variables
 
@@ -155,6 +186,7 @@ or `~/.gemini/tmp/...`).
 | `CLAUDE_CONFIG_DIR`   | Claude Code's native override; `ccr` appends `projects`    |
 | `CCR_CODEX_DIR`       | Full path to Codex's `sessions/` dir                       |
 | `CCR_GEMINI_DIR`      | Full path to Gemini's `~/.gemini` root                     |
+| `CCR_OPENCODE_DIR`    | Full path to OpenCode's data dir (holds `opencode.db`)     |
 | `CCR_BOOKMARKS_FILE`  | Override the `~/.ccr/bookmarks.json` location              |
 | `CCR_NICKNAMES_FILE`  | Override the `~/.ccr/nicknames.json` location              |
 
@@ -167,6 +199,15 @@ Each backend knows where its tool stores sessions and how to resume one.
 | Claude Code | `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`         | `claude --resume <uuid>` (cwd set)   |
 | Codex       | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`          | `codex resume <uuid>` (cwd set)      |
 | Gemini CLI  | `~/.gemini/tmp/<project>/chats/session-*.json` + `projects.json` | `gemini --resume <N>` — ccr looks up the 1-based index at runtime via `gemini --list-sessions` |
+| OpenCode    | `~/.local/share/opencode/opencode.db` (SQLite, v2)      | `opencode --session <id>` (cwd set)  |
+
+OpenCode v2 keeps every session in one SQLite database that its background
+service writes continuously (WAL mode). `ccr` never opens the live database:
+each read works on a throwaway snapshot copy (WAL sidecar first, then the db)
+that is deleted right after, so the store stays strictly read-only at rest
+and no lock is ever taken against a running OpenCode. `ccr path <id>` for an
+OpenCode session prints the db path; `ccr show <id>` dumps its raw message
+rows as JSONL instead of catting binary.
 
 For each session `ccr` extracts:
 
@@ -190,10 +231,12 @@ pub trait Backend: Send + Sync {
     fn name(&self) -> &'static str;
     fn scan(&self) -> Result<Vec<Session>>;
     fn resume(&self, s: &Session) -> std::process::Command;
+    fn open_with_prompt(&self, cwd: &Path, prompt: &str) -> std::process::Command;
     fn all_turns(&self, s: &Session) -> Result<Vec<Turn>>;  // for ccr export
 
-    // Optional override with a useful default:
+    // Optional overrides with useful defaults:
     fn running(&self, s: &Session) -> Vec<String>;   // default: id-as-resume-arg pgrep match
+    fn show(&self, s: &Session) -> Result<String>;   // default: cat the origin file
 }
 ```
 

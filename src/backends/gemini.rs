@@ -112,6 +112,14 @@ impl Backend for GeminiBackend {
         cmd
     }
 
+    fn open_with_prompt(&self, cwd: &Path, prompt: &str) -> Command {
+        // No shell wrapper needed: a brand-new session takes the prompt as a
+        // plain positional argument (`gemini "<prompt>"`).
+        let mut cmd = Command::new("gemini");
+        cmd.arg(prompt).current_dir(cwd);
+        cmd
+    }
+
     fn running(&self, _s: &Session) -> Vec<String> {
         // `gemini --resume N` doesn't embed the session UUID in argv,
         // so pgrep-by-id gives no signal — skip live-detection.
@@ -244,6 +252,14 @@ mod tests {
 
     fn parse(json: &str) -> Option<Session> {
         parse_session_from_json(json, PathBuf::from("/proj"), PathBuf::from("<test>")).unwrap()
+    }
+
+    #[test]
+    fn open_with_prompt_passes_prompt_positionally() {
+        let cmd = GeminiBackend.open_with_prompt(Path::new("/proj"), "continue this");
+        assert_eq!(cmd.get_program(), "gemini");
+        assert_eq!(cmd.get_args().collect::<Vec<_>>(), vec!["continue this"]);
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/proj")));
     }
 
     #[test]

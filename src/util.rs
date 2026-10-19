@@ -1,6 +1,8 @@
+use anyhow::{Result, bail};
 use chrono::{DateTime, Local, TimeZone, Utc};
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::session::LIVE_WINDOW_SECS;
 
@@ -49,6 +51,10 @@ pub fn is_possibly_live(last_activity: DateTime<Local>) -> bool {
 /// session id: `claude --resume <id>` / `claude -r <id>` / `codex resume <id>`.
 const RESUME_FLAGS: [&str; 3] = ["--resume", "-r", "resume"];
 
+/// Resume-flag sets per tool family. OpenCode resumes via
+/// `opencode --session <id>` / `opencode -s <id>`.
+pub const OPENCODE_SESSION_FLAGS: [&str; 2] = ["--session", "-s"];
+
 /// pgrep flags that print `PID full-cmdline` lines, which differ by platform:
 /// procps (Linux) uses `-a` for "list full command line", but BSD/macOS `-a`
 /// means "include process ancestors" and prints bare PIDs — there, `-l`
@@ -71,6 +77,12 @@ const PGREP_LIST_ARGS: [&str; 1] = ["-fl"];
 /// subcommand, or a shell line that names it. Returns `pid cmdline` strings.
 /// Empty on non-Unix or no match.
 pub fn pgrep_session(id: &str) -> Vec<String> {
+    pgrep_session_flags(id, &RESUME_FLAGS)
+}
+
+/// [`pgrep_session`] with an explicit flag set, for tools whose resume argv
+/// is not `--resume`-shaped (e.g. OpenCode's `--session <id>`).
+pub fn pgrep_session_flags(id: &str, flags: &[&str]) -> Vec<String> {
     let own_pid = std::process::id().to_string();
     let mut args: Vec<&str> = PGREP_LIST_ARGS.to_vec();
     args.push(id);
@@ -83,7 +95,7 @@ pub fn pgrep_session(id: &str) -> Vec<String> {
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(sanitize_line)
-        .filter(|l| line_resumes_session(l, id, &own_pid))
+        .filter(|l| line_resumes_session(l, id, &own_pid, flags))
         .collect()
 }
 
@@ -106,10 +118,10 @@ fn sanitize_line(line: &str) -> String {
 }
 
 /// True when a `PID full-cmdline` pgrep line (`<pid> <arg0> <arg1> …`) is a live attach to
-/// `id`: not our own PID, not a `ccr` process, and carries the id as a resume
-/// argument. Split out from [`pgrep_session`] so the matching logic is testable
-/// without spawning `pgrep`.
-fn line_resumes_session(line: &str, id: &str, own_pid: &str) -> bool {
+/// `id`: not our own PID, not a `ccr` process, and carries the id as the
+/// value of one of `flags`. Split out from [`pgrep_session_flags`] so the
+/// matching logic is testable without spawning `pgrep`.
+fn line_resumes_session(line: &str, id: &str, own_pid: &str, flags: &[&str]) -> bool {
     let mut parts = line.split_whitespace();
     let Some(pid) = parts.next() else {
         return false;
@@ -125,20 +137,20 @@ fn line_resumes_session(line: &str, id: &str, own_pid: &str) -> bool {
         return false;
     }
     let args: Vec<&str> = parts.collect();
-    resume_arg_present(&args, id)
+    resume_arg_present(&args, id, flags)
 }
 
-/// True when `id` appears in `args` as the value of a resume flag — either the
-/// separate form (`--resume <id>`) or the fused form (`--resume=<id>`).
-fn resume_arg_present(args: &[&str], id: &str) -> bool {
+/// True when `id` appears in `args` as the value of one of `flags` — either
+/// the separate form (`--resume <id>`) or the fused form (`--resume=<id>`).
+fn resume_arg_present(args: &[&str], id: &str, flags: &[&str]) -> bool {
     args.iter().enumerate().any(|(i, tok)| {
         if let Some((flag, val)) = tok.split_once('=')
-            && RESUME_FLAGS.contains(&flag)
+            && flags.contains(&flag)
             && val == id
         {
             return true;
         }
-        *tok == id && i > 0 && RESUME_FLAGS.contains(&args[i - 1])
+        *tok == id && i > 0 && flags.contains(&args[i - 1])
     })
 }
 
@@ -150,6 +162,48 @@ pub fn file_mtime(path: &Path) -> DateTime<Local> {
         Ok(t) => DateTime::<Utc>::from(t).with_timezone(&Local),
         Err(_) => Local.timestamp_opt(0, 0).unwrap(),
     }
+}
+
+/// Clipboard helpers tried in order, with the extra args each needs to read
+/// the clipboard's text from stdin. macOS ships `pbcopy`; Linux desktops
+/// have `wl-copy` (Wayland) or `xclip`/`xsel` (X11).
+#[cfg(target_os = "macos")]
+const CLIPBOARD_HELPERS: [(&str, &[&str]); 1] = [("pbcopy", &[])];
+#[cfg(not(target_os = "macos"))]
+const CLIPBOARD_HELPERS: [(&str, &[&str]); 3] = [
+    ("wl-copy", &[]),
+    ("xclip", &["-selection", "clipboard"]),
+    ("xsel", &["--clipboard", "--input"]),
+];
+
+/// Copy `text` to the system clipboard via the first helper found on PATH,
+/// returning the helper's name for status display. Fails when no helper is
+/// installed (or every helper exits nonzero).
+pub fn copy_to_clipboard(text: &str) -> Result<String> {
+    for (prog, args) in CLIPBOARD_HELPERS {
+        let Ok(mut child) = Command::new(prog)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue; // not on PATH — try the next helper
+        };
+        // Close stdin after writing so the helper sees EOF and flushes.
+        let wrote = child
+            .stdin
+            .take()
+            .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+        if wrote
+            && let Ok(status) = child.wait()
+            && status.success()
+        {
+            return Ok(prog.to_string());
+        }
+    }
+    let tried: Vec<&str> = CLIPBOARD_HELPERS.iter().map(|(p, _)| *p).collect();
+    bail!("no clipboard helper on PATH (tried {})", tried.join(", "));
 }
 
 #[cfg(test)]
@@ -236,50 +290,73 @@ mod tests {
 
     const ID: &str = "abc-123";
 
+    /// `line_resumes_session` with the default claude/codex flag set.
+    fn lrs(line: &str) -> bool {
+        line_resumes_session(line, ID, "1", &RESUME_FLAGS)
+    }
+
     #[test]
     fn matches_claude_and_codex_resume_argv() {
+        assert!(lrs(&format!("42318 claude --resume {ID}")));
+        assert!(lrs(&format!("42318 claude -r {ID}")));
+        assert!(lrs(&format!("42318 /usr/bin/codex resume {ID}")));
+        assert!(lrs(&format!("42318 claude --resume={ID}")));
+    }
+
+    #[test]
+    fn matches_opencode_session_argv() {
+        let id = "ses_eaa3c3a6cffeBUEg8IeoIAvPIz";
+        let f = &OPENCODE_SESSION_FLAGS;
         assert!(line_resumes_session(
-            &format!("42318 claude --resume {ID}"),
-            ID,
-            "1"
+            &format!("42318 opencode --session {id}"),
+            id,
+            "1",
+            f
         ));
         assert!(line_resumes_session(
-            &format!("42318 claude -r {ID}"),
-            ID,
-            "1"
+            &format!("42318 opencode -s {id}"),
+            id,
+            "1",
+            f
         ));
         assert!(line_resumes_session(
-            &format!("42318 /usr/bin/codex resume {ID}"),
-            ID,
-            "1"
+            &format!("42318 opencode --session={id}"),
+            id,
+            "1",
+            f
         ));
         assert!(line_resumes_session(
-            &format!("42318 claude --resume={ID}"),
-            ID,
-            "1"
+            &format!("42318 opencode run --session {id}"),
+            id,
+            "1",
+            f
         ));
+    }
+
+    #[test]
+    fn opencode_flags_do_not_match_resume_shaped_argv_and_vice_versa() {
+        let id = "ses_eaa3c3a6cffeBUEg8IeoIAvPIz";
+        // claude-style flags must not trip OpenCode's guard
+        assert!(!line_resumes_session(
+            &format!("42318 claude --resume {id}"),
+            id,
+            "1",
+            &OPENCODE_SESSION_FLAGS
+        ));
+        // and OpenCode's `-s` must not trip the default guard
+        assert!(!lrs(&format!("42318 opencode -s {id}")));
     }
 
     #[test]
     fn ignores_bare_mentions_of_the_id() {
         // editor / tail with the session file open — id is a substring of the
         // filename token, not a resume argument
-        assert!(!line_resumes_session(
-            &format!("42318 nvim /home/me/.claude/projects/x/{ID}.jsonl"),
-            ID,
-            "1"
-        ));
-        assert!(!line_resumes_session(
-            &format!("42318 tail -f /x/{ID}.jsonl"),
-            ID,
-            "1"
-        ));
+        assert!(!lrs(&format!(
+            "42318 nvim /home/me/.claude/projects/x/{ID}.jsonl"
+        )));
+        assert!(!lrs(&format!("42318 tail -f /x/{ID}.jsonl")));
         // a shell line that names the id but is not resuming it
-        assert!(!line_resumes_session(
-            &format!("42318 grep {ID} log.txt"),
-            ID,
-            "1"
-        ));
+        assert!(!lrs(&format!("42318 grep {ID} log.txt")));
     }
 
     #[test]
@@ -287,35 +364,32 @@ mod tests {
         assert!(!line_resumes_session(
             &format!("77 claude --resume {ID}"),
             ID,
-            "77"
+            "77",
+            &RESUME_FLAGS
         ));
-        assert!(!line_resumes_session(
-            &format!("42318 ccr resume {ID}"),
-            ID,
-            "1"
-        ));
-        assert!(!line_resumes_session(
-            &format!("42318 /opt/bin/ccr resume {ID}"),
-            ID,
-            "1"
-        ));
+        assert!(!lrs(&format!("42318 ccr resume {ID}")));
+        assert!(!lrs(&format!("42318 /opt/bin/ccr resume {ID}")));
     }
 
     #[test]
     fn resume_arg_present_requires_flag_before_id() {
-        assert!(resume_arg_present(&["--resume", ID], ID));
-        assert!(resume_arg_present(&["resume", ID], ID));
-        assert!(resume_arg_present(&["--resume=abc-123"], ID));
-        assert!(!resume_arg_present(&[ID], ID)); // id with no preceding flag
-        assert!(!resume_arg_present(&["--other", ID], ID));
-        assert!(!resume_arg_present(&["--resume", "other-id"], ID));
+        assert!(resume_arg_present(&["--resume", ID], ID, &RESUME_FLAGS));
+        assert!(resume_arg_present(&["resume", ID], ID, &RESUME_FLAGS));
+        assert!(resume_arg_present(&["--resume=abc-123"], ID, &RESUME_FLAGS));
+        assert!(!resume_arg_present(&[ID], ID, &RESUME_FLAGS)); // id with no preceding flag
+        assert!(!resume_arg_present(&["--other", ID], ID, &RESUME_FLAGS));
+        assert!(!resume_arg_present(
+            &["--resume", "other-id"],
+            ID,
+            &RESUME_FLAGS
+        ));
     }
 
     #[test]
     fn fused_short_and_bare_forms_match() {
-        assert!(resume_arg_present(&["-r=abc-123"], ID));
-        assert!(resume_arg_present(&["resume=abc-123"], ID));
-        assert!(!resume_arg_present(&["-r=other-id"], ID));
+        assert!(resume_arg_present(&["-r=abc-123"], ID, &RESUME_FLAGS));
+        assert!(resume_arg_present(&["resume=abc-123"], ID, &RESUME_FLAGS));
+        assert!(!resume_arg_present(&["-r=other-id"], ID, &RESUME_FLAGS));
     }
 
     // These false positives are ACCEPTED by design: the matcher deliberately
@@ -327,18 +401,10 @@ mod tests {
     #[test]
     fn accepted_false_positives_are_documented() {
         // `grep -r <id> <dir>`: "-r" happens to be a resume flag token.
-        assert!(line_resumes_session(
-            &format!("42318 grep -r {ID} /var/log"),
-            ID,
-            "1"
-        ));
+        assert!(lrs(&format!("42318 grep -r {ID} /var/log")));
         // pgrep space-joins argv without quoting, so a single text argument
         // *containing* "--resume <id>" tokenizes into a phantom flag+id pair.
-        assert!(line_resumes_session(
-            &format!("42318 claude -p why does --resume {ID} hang"),
-            ID,
-            "1"
-        ));
+        assert!(lrs(&format!("42318 claude -p why does --resume {ID} hang")));
     }
 
     #[test]
