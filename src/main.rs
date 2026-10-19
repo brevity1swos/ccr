@@ -88,9 +88,9 @@ fn run_path(id: &str) -> Result<()> {
 }
 
 fn run_show(id: &str) -> Result<()> {
-    let s = find_session_by_id(id)?;
-    let content = std::fs::read_to_string(&s.origin)
-        .with_context(|| format!("read {}", s.origin.display()))?;
+    let backends = all();
+    let (backend, session) = find_session_and_backend(&backends, id)?;
+    let content = backend.show(&session)?;
     print!("{content}");
     Ok(())
 }
