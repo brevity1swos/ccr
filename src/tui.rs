@@ -238,12 +238,10 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
                     mode = Mode::List;
                 }
             }
-            Mode::Confirm { session, .. } => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    break AppAction::Resume(session.clone());
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => mode = Mode::List,
-                _ => {}
+            Mode::Confirm { session, .. } => match confirm_choice(key.code) {
+                Some(true) => break AppAction::Resume(session.clone()),
+                Some(false) => mode = Mode::List,
+                None => {}
             },
             Mode::NicknameInput { session_id, buf } => {
                 let id = session_id.clone();
@@ -363,6 +361,17 @@ fn matches_filter(
         || nicknames
             .get(&s.id)
             .is_some_and(|n| n.to_lowercase().contains(&needle))
+}
+
+/// Live-session confirm modal: `Some(true)` resume anyway, `Some(false)`
+/// cancel, `None` ignore. Only an explicit `y` confirms — Enter is the key that
+/// opened the modal, so accepting it would let a double-tap skip the warning.
+fn confirm_choice(code: KeyCode) -> Option<bool> {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(false),
+        _ => None,
+    }
 }
 
 fn move_sel(state: &mut ListState, visible: &[&Session], delta: i32) {
@@ -1040,5 +1049,15 @@ mod tests {
         let c = exact_count_for(&mut cache, "id2", None, yield_turns);
         assert_eq!(c, 3);
         assert_eq!(calls.get(), 1); // cached on second call
+    }
+
+    #[test]
+    fn confirm_requires_explicit_y() {
+        assert_eq!(confirm_choice(KeyCode::Char('y')), Some(true));
+        assert_eq!(confirm_choice(KeyCode::Char('Y')), Some(true));
+        assert_eq!(confirm_choice(KeyCode::Char('n')), Some(false));
+        assert_eq!(confirm_choice(KeyCode::Esc), Some(false));
+        // Enter opened the modal; a double-tap must not resume through it.
+        assert_eq!(confirm_choice(KeyCode::Enter), None);
     }
 }
