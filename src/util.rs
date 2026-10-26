@@ -146,6 +146,19 @@ fn resume_arg_present(args: &[&str], id: &str) -> bool {
     })
 }
 
+/// Replace `path` with `contents` atomically: write a sibling temp file, then
+/// rename over the target, so a crash or concurrent reader never sees a
+/// half-written file (which the JSON loaders would read as empty).
+pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp.{}", std::process::id()));
+    let tmp = std::path::PathBuf::from(tmp);
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
 /// File modification time as `DateTime<Local>`, or the unix epoch when the
 /// file is missing or has no mtime. Used as a last-resort `last_activity`
 /// when a tail window yields no message timestamp.

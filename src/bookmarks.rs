@@ -20,17 +20,13 @@ pub fn load() -> HashSet<String> {
     load_from(&path)
 }
 
-pub fn save(bookmarks: &HashSet<String>) -> Result<()> {
-    save_to(bookmarks, &bookmarks_path()?)
-}
-
 fn save_to(bookmarks: &HashSet<String>, path: &std::path::Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create dir {}", parent.display()))?;
     }
     let mut list: Vec<&str> = bookmarks.iter().map(|s| s.as_str()).collect();
     list.sort();
-    fs::write(path, serde_json::to_string_pretty(&list)?)
+    crate::util::write_atomic(path, &serde_json::to_string_pretty(&list)?)
         .with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
@@ -44,13 +40,25 @@ fn load_from(path: &std::path::Path) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-/// Add if absent, remove if present. Persists after mutation.
+/// Add if absent, remove if present, then persist. If the save fails the
+/// in-memory set is restored, so the UI never shows a change that was lost.
 pub fn toggle(bookmarks: &mut HashSet<String>, id: &str) -> Result<bool> {
+    toggle_in(bookmarks, id, &bookmarks_path()?)
+}
+
+fn toggle_in(bookmarks: &mut HashSet<String>, id: &str, path: &std::path::Path) -> Result<bool> {
     let was_present = bookmarks.remove(id);
     if !was_present {
         bookmarks.insert(id.to_string());
     }
-    save(bookmarks)?;
+    if let Err(e) = save_to(bookmarks, path) {
+        if was_present {
+            bookmarks.insert(id.to_string());
+        } else {
+            bookmarks.remove(id);
+        }
+        return Err(e);
+    }
     Ok(!was_present) // returns new state: true == now bookmarked
 }
 
@@ -88,13 +96,34 @@ mod tests {
     #[test]
     fn toggle_adds_then_removes() {
         let p = tmp_path();
-        unsafe { std::env::set_var("CCR_BOOKMARKS_FILE", &p) };
         let mut s = HashSet::new();
-        assert!(toggle(&mut s, "xyz").unwrap());
+        assert!(toggle_in(&mut s, "xyz", &p).unwrap());
         assert!(s.contains("xyz"));
-        assert!(!toggle(&mut s, "xyz").unwrap());
+        assert!(!toggle_in(&mut s, "xyz", &p).unwrap());
         assert!(!s.contains("xyz"));
-        unsafe { std::env::remove_var("CCR_BOOKMARKS_FILE") };
+        let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn failed_save_restores_previous_state() {
+        // Parent "directory" is a regular file, so the save cannot succeed.
+        let blocker = tmp_path();
+        fs::write(&blocker, "").unwrap();
+        let p = blocker.join("bookmarks.json");
+        let mut s: HashSet<String> = ["kept".to_string()].into();
+        assert!(toggle_in(&mut s, "new", &p).is_err());
+        assert!(!s.contains("new"));
+        assert!(toggle_in(&mut s, "kept", &p).is_err());
+        assert!(s.contains("kept"));
+        let _ = fs::remove_file(&blocker);
+    }
+
+    #[test]
+    fn save_leaves_no_temp_file_behind() {
+        let p = tmp_path();
+        save_to(&["a".to_string()].into(), &p).unwrap();
+        let tmp = format!("{}.tmp.{}", p.display(), std::process::id());
+        assert!(!std::path::Path::new(&tmp).exists());
         let _ = fs::remove_file(&p);
     }
 

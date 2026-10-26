@@ -18,15 +18,11 @@ pub fn load() -> HashMap<String, String> {
     load_from(&path)
 }
 
-pub fn save(nicknames: &HashMap<String, String>) -> Result<()> {
-    save_to(nicknames, &nicknames_path()?)
-}
-
 fn save_to(nicknames: &HashMap<String, String>, path: &std::path::Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create dir {}", parent.display()))?;
     }
-    fs::write(path, serde_json::to_string_pretty(nicknames)?)
+    crate::util::write_atomic(path, &serde_json::to_string_pretty(nicknames)?)
         .with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
@@ -40,12 +36,30 @@ fn load_from(path: &std::path::Path) -> HashMap<String, String> {
 
 /// Set a nickname. Empty or whitespace-only name removes the entry.
 pub fn set(nicknames: &mut HashMap<String, String>, id: &str, name: &str) -> Result<()> {
-    if name.trim().is_empty() {
-        nicknames.remove(id);
+    set_in(nicknames, id, name, &nicknames_path()?)
+}
+
+/// [`set`] against an explicit file. If the save fails the in-memory map is
+/// restored, so the UI never shows a nickname that was not persisted.
+fn set_in(
+    nicknames: &mut HashMap<String, String>,
+    id: &str,
+    name: &str,
+    path: &std::path::Path,
+) -> Result<()> {
+    let previous = if name.trim().is_empty() {
+        nicknames.remove(id)
     } else {
-        nicknames.insert(id.to_string(), name.trim().to_string());
-    }
-    save(nicknames)
+        nicknames.insert(id.to_string(), name.trim().to_string())
+    };
+    save_to(nicknames, path).inspect_err(|_| match previous {
+        Some(old) => {
+            nicknames.insert(id.to_string(), old);
+        }
+        None => {
+            nicknames.remove(id);
+        }
+    })
 }
 
 #[cfg(test)]
@@ -81,24 +95,35 @@ mod tests {
     #[test]
     fn set_adds_and_removes() {
         let p = tmp_path();
-        unsafe { std::env::set_var("CCR_NICKNAMES_FILE", &p) };
         let mut m = HashMap::new();
-        set(&mut m, "abc", "hello").unwrap();
+        set_in(&mut m, "abc", "hello", &p).unwrap();
         assert_eq!(m.get("abc").map(String::as_str), Some("hello"));
-        set(&mut m, "abc", "").unwrap();
+        set_in(&mut m, "abc", "", &p).unwrap();
         assert!(!m.contains_key("abc"));
-        unsafe { std::env::remove_var("CCR_NICKNAMES_FILE") };
         let _ = fs::remove_file(&p);
     }
 
     #[test]
     fn set_trims_whitespace() {
         let p = tmp_path();
-        unsafe { std::env::set_var("CCR_NICKNAMES_FILE", &p) };
         let mut m = HashMap::new();
-        set(&mut m, "abc", "  hello  ").unwrap();
+        set_in(&mut m, "abc", "  hello  ", &p).unwrap();
         assert_eq!(m.get("abc").map(String::as_str), Some("hello"));
-        unsafe { std::env::remove_var("CCR_NICKNAMES_FILE") };
         let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn failed_save_restores_previous_nickname() {
+        // Parent "directory" is a regular file, so the save cannot succeed.
+        let blocker = tmp_path();
+        fs::write(&blocker, "").unwrap();
+        let p = blocker.join("nicknames.json");
+        let mut m = HashMap::new();
+        m.insert("abc".to_string(), "old".to_string());
+        assert!(set_in(&mut m, "abc", "new", &p).is_err());
+        assert_eq!(m.get("abc").map(String::as_str), Some("old"));
+        assert!(set_in(&mut m, "xyz", "fresh", &p).is_err());
+        assert!(!m.contains_key("xyz"));
+        let _ = fs::remove_file(&blocker);
     }
 }
