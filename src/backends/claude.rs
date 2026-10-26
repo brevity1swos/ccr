@@ -45,13 +45,17 @@ impl Backend for ClaudeBackend {
             return Ok(Vec::new());
         }
         let mut files = Vec::new();
+        // Per-entry errors (permission denied, a dir removed mid-scan) skip
+        // that entry only — one bad project dir must not hide every session.
         for entry in fs::read_dir(&root).with_context(|| format!("read_dir {}", root.display()))? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+            let Ok(entry) = entry else { continue };
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
                 continue;
             }
-            for f in fs::read_dir(entry.path())? {
-                let f = f?;
+            let Ok(dir) = fs::read_dir(entry.path()) else {
+                continue;
+            };
+            for f in dir.flatten() {
                 let p = f.path();
                 if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                     continue;

@@ -94,12 +94,14 @@ impl Backend for CodexBackend {
     }
 }
 
+/// Collect `.jsonl` files under `dir`. Only an unreadable root is an error;
+/// unreadable subdirectories and entries are skipped so one bad dir doesn't
+/// hide every session.
 fn walk_jsonl(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+    for entry in fs::read_dir(dir)?.flatten() {
         let p = entry.path();
-        if entry.file_type()?.is_dir() {
-            walk_jsonl(&p, out)?;
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            let _ = walk_jsonl(&p, out);
         } else if p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
             out.push(p);
         }
@@ -310,6 +312,25 @@ mod tests {
         assert!(s.title.starts_with("q "));
         assert_eq!(s.message_count, None);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn walk_jsonl_skips_unreadable_subdir() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("ccr-codex-walk-{}", std::process::id()));
+        let good = root.join("2026/01");
+        let bad = root.join("locked");
+        fs::create_dir_all(&good).unwrap();
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(good.join("s.jsonl"), "").unwrap();
+        fs::set_permissions(&bad, fs::Permissions::from_mode(0o000)).unwrap();
+        let mut files = Vec::new();
+        let res = walk_jsonl(&root, &mut files);
+        fs::set_permissions(&bad, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(&root).ok();
+        assert!(res.is_ok());
+        assert_eq!(files, vec![good.join("s.jsonl")]);
     }
 
     #[test]

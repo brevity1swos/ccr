@@ -66,9 +66,10 @@ impl Backend for GeminiBackend {
         // Collect (path, cwd) pairs sequentially (directory walk), then
         // parse files in parallel — see claude backend comment.
         let mut work: Vec<(PathBuf, PathBuf)> = Vec::new();
+        // Per-entry errors skip that entry only — see claude backend.
         for entry in fs::read_dir(&tmp).with_context(|| format!("read_dir {}", tmp.display()))? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+            let Ok(entry) = entry else { continue };
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
                 continue;
             }
             let short_name = entry.file_name().to_string_lossy().into_owned();
@@ -80,8 +81,10 @@ impl Backend for GeminiBackend {
                 .get(&short_name)
                 .cloned()
                 .unwrap_or_else(|| PathBuf::from(format!("(unknown: {short_name})")));
-            for f in fs::read_dir(&chats)? {
-                let f = f?;
+            let Ok(dir) = fs::read_dir(&chats) else {
+                continue;
+            };
+            for f in dir.flatten() {
                 let p = f.path();
                 if p.extension().and_then(|e| e.to_str()) != Some("json") {
                     continue;
