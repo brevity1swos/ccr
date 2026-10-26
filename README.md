@@ -108,7 +108,7 @@ ccr
 | `b`         | toggle bookmark (★ marker, persisted)   |
 | `n`         | set / edit / clear session nickname (yellow label) |
 | `?` / `F1`  | help overlay                            |
-| `q` / `Esc` | quit                                    |
+| `q` / `Esc` / `Ctrl+C` | quit                         |
 
 [agx]: https://github.com/brevity1swos/agx
 

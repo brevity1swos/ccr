@@ -1,7 +1,10 @@
 use anyhow::Result;
 use crossterm::{
     cursor::Show as ShowCursor,
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -216,6 +219,9 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        if is_interrupt(&key) {
+            break AppAction::Quit;
+        }
 
         match &mode {
             Mode::Filter => match key.code {
@@ -361,6 +367,12 @@ fn matches_filter(
         || nicknames
             .get(&s.id)
             .is_some_and(|n| n.to_lowercase().contains(&needle))
+}
+
+/// Ctrl+C. Raw mode delivers it as a key event rather than SIGINT, so without
+/// this it would be ignored in the list and typed as `c` into text inputs.
+fn is_interrupt(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 /// Live-session confirm modal: `Some(true)` resume anyway, `Some(false)`
@@ -809,7 +821,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         ),
         k("/", "filter: title, cwd, tool, nickname, or content"),
         k("? / F1", "this help"),
-        k("q / Esc", "quit"),
+        k("q / Esc / ^C", "quit"),
         Line::from(""),
         section("Indicators"),
         k("[tool]", "which CLI assistant owns the session"),
@@ -1059,5 +1071,17 @@ mod tests {
         assert_eq!(confirm_choice(KeyCode::Esc), Some(false));
         // Enter opened the modal; a double-tap must not resume through it.
         assert_eq!(confirm_choice(KeyCode::Enter), None);
+    }
+
+    #[test]
+    fn ctrl_c_is_interrupt_but_plain_c_is_not() {
+        assert!(is_interrupt(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_interrupt(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE
+        )));
     }
 }
