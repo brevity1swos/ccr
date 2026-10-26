@@ -178,6 +178,18 @@ fn force_overrides_live_guard() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("FAKE argv"));
 }
 
+#[test]
+fn missing_cwd_is_reported_not_blamed_on_path() {
+    let fx = Fixture::new("nocwd");
+    fs::remove_dir_all(fx.root.join("cwd")).unwrap();
+    let out = fx.run(&["resume", &fx.id]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr_of(&out);
+    assert!(err.contains("does not exist"), "stderr: {err}");
+    assert!(!err.contains("PATH"), "stderr: {err}");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("FAKE argv"));
+}
+
 /// The store override must also keep `path` working against the fixture —
 /// guards the CCR_CLAUDE_DIR plumbing the other tests depend on.
 #[test]

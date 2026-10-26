@@ -128,11 +128,30 @@ fn run_resume(id: &str, force: bool) -> Result<()> {
             std::process::exit(1);
         }
     }
-    let status = backend
-        .resume(&session)
+    std::process::exit(spawn_resume(backend, &session)?);
+}
+
+/// Spawn the backend's resume command and return its exit code. Checks the
+/// working directory first: a missing cwd (deleted project, or a placeholder
+/// like `(unknown)` when the store never recorded one) makes the spawn fail
+/// with `NotFound`, which would otherwise be misreported as the tool missing
+/// from PATH.
+fn spawn_resume(backend: &dyn Backend, s: &Session) -> Result<i32> {
+    let mut cmd = backend.resume(s);
+    if let Some(dir) = cmd.get_current_dir()
+        && !dir.is_dir()
+    {
+        anyhow::bail!(
+            "cannot resume {} session {}: working directory `{}` does not exist",
+            s.backend,
+            s.id,
+            dir.display()
+        );
+    }
+    let status = cmd
         .status()
-        .with_context(|| format!("failed to spawn `{}` — is it on PATH?", session.backend))?;
-    std::process::exit(status.code().unwrap_or(1));
+        .with_context(|| format!("failed to spawn `{}` — is it on PATH?", s.backend))?;
+    Ok(status.code().unwrap_or(1))
 }
 
 fn run_export(id: &str, format: ExportFormat) -> Result<()> {
@@ -320,11 +339,7 @@ fn launch_picker() -> Result<()> {
         AppAction::Resume(s) => {
             let backend = by_name(&backends, s.backend)
                 .with_context(|| format!("unknown backend `{}`", s.backend))?;
-            let status = backend
-                .resume(&s)
-                .status()
-                .with_context(|| format!("failed to spawn `{}` — is it on PATH?", s.backend))?;
-            std::process::exit(status.code().unwrap_or(1));
+            std::process::exit(spawn_resume(backend, &s)?);
         }
         AppAction::View(s) => {
             let status = std::process::Command::new("agx")
