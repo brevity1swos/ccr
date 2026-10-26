@@ -389,7 +389,9 @@ mod tests {
             !s.searchable.contains("earlyneedle77"),
             "tail-window searchable unexpectedly reached the file start — grow the filler"
         );
-        let full = crate::backends::full_searchable(&ClaudeBackend, &path);
+        let full = crate::backends::full_history(&ClaudeBackend, &path)
+            .expect("readable")
+            .searchable;
         assert!(full.contains("earlyneedle77"));
         assert!(full.contains("filler message number 0"));
         std::fs::remove_file(&path).ok();

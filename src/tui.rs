@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use crate::backends::{Backend, all, by_name, full_searchable};
+use crate::backends::{Backend, FullHistory, all, by_name, full_history};
 use crate::bookmarks;
 use crate::nicknames;
 use crate::session::{Role, Session};
@@ -67,16 +67,15 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// id → full-history searchable text, shared between the TUI loop (reads)
-/// and the warm-up thread (writes).
-type SearchCache = Arc<RwLock<HashMap<String, String>>>;
+/// id → full-history searchable text + exact turn count, shared between the
+/// TUI loop (reads) and the warm-up thread (writes).
+type SearchCache = Arc<RwLock<HashMap<String, FullHistory>>>;
 
-/// Read every session's full conversation text into `cache` (id → lowercased,
-/// capped searchable). Runs on a background thread right after TUI startup so
-/// `/` searches full history without slowing the tail-window scan; sessions
-/// the warm-up hasn't reached yet fall back to their scan-time `searchable`.
-/// Empty results (unreadable file, no turns) are not cached so the fallback
-/// keeps working for them.
+/// Read every session's full conversation into `cache`. Runs on a background
+/// thread right after TUI startup so `/` searches full history — and the
+/// preview's exact message count fills in — without slowing the tail-window
+/// scan or blocking navigation; sessions the warm-up hasn't reached yet fall
+/// back to their scan-time `searchable`. Unreadable files are not cached.
 /// Warm-up reads whole files; don't fan that out to every core the way the
 /// (cheap) tail-window scan does — a 64-core NFS login node would otherwise
 /// issue 64 concurrent full-file reads for a background nicety.
@@ -95,8 +94,7 @@ fn warm_search_cache(
         let Some(b) = by_name(&backends, backend_name) else {
             return;
         };
-        let full = full_searchable(b, &origin);
-        if !full.is_empty()
+        if let Some(full) = full_history(b, &origin)
             && let Ok(mut map) = cache.write()
         {
             map.insert(id, full);
@@ -127,7 +125,6 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
     let mut mode = Mode::List;
     let mut bookmarked: HashSet<String> = bookmarks::load();
     let mut nicknames: HashMap<String, String> = nicknames::load();
-    let mut count_cache: HashMap<String, usize> = HashMap::new();
 
     let search_cache: SearchCache = Arc::new(RwLock::new(HashMap::new()));
     let warming = Arc::new(AtomicBool::new(true));
@@ -160,21 +157,17 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
         // the next frame is built from the completed cache before the loop
         // returns to blocking reads.
         let was_warming = warming.load(Ordering::Acquire);
-        let visible: Vec<&Session> = {
-            // One read lock per frame; writers (warm-up threads) interleave
-            // between frames.
-            let cache = search_cache.read().ok();
-            sessions
-                .iter()
-                .filter(|s| {
-                    let full = cache
-                        .as_ref()
-                        .and_then(|m| m.get(&s.id))
-                        .map(String::as_str);
-                    matches_filter(s, &filter, &nicknames, full)
-                })
-                .collect()
-        };
+        // One read lock per frame; writers (warm-up threads) interleave
+        // between frames.
+        let cache = search_cache.read().ok();
+        let warmed = |s: &Session| cache.as_ref().and_then(|m| m.get(&s.id));
+        let visible: Vec<&Session> = sessions
+            .iter()
+            .filter(|s| {
+                let full = warmed(s).map(|h| h.searchable.as_str());
+                matches_filter(s, &filter, &nicknames, full)
+            })
+            .collect();
         match state.selected() {
             Some(sel) if sel >= visible.len() => state.select(if visible.is_empty() {
                 None
@@ -185,15 +178,13 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
             _ => {}
         }
 
-        let selected_count: Option<usize> =
-            state.selected().and_then(|i| visible.get(i)).map(|s| {
-                exact_count_for(&mut count_cache, &s.id, s.message_count, || {
-                    by_name(backends, s.backend)
-                        .and_then(|b| b.all_turns(s).ok())
-                        .map(|t| t.len())
-                        .unwrap_or(0)
-                })
-            });
+        let selected_count = state.selected().and_then(|i| visible.get(i)).map(|s| {
+            count_label(
+                s.message_count.or_else(|| warmed(s).map(|h| h.turns)),
+                was_warming,
+            )
+        });
+        drop(cache);
 
         terminal.draw(|f| {
             ui(
@@ -204,7 +195,7 @@ pub fn run(sessions: Vec<Session>, backends: &[Box<dyn Backend>]) -> Result<AppA
                 &mode,
                 &bookmarked,
                 &nicknames,
-                selected_count,
+                selected_count.as_deref(),
             )
         })?;
 
@@ -395,23 +386,16 @@ fn move_sel(state: &mut ListState, visible: &[&Session], delta: i32) {
     state.select(Some(new as usize));
 }
 
-/// Resolve a session's exact turn count: `Some(n)` short-circuits; otherwise
-/// compute via `yield_turns` once and memoize under `id`.
-fn exact_count_for(
-    cache: &mut HashMap<String, usize>,
-    id: &str,
-    known: Option<usize>,
-    yield_turns: impl FnOnce() -> usize,
-) -> usize {
-    if let Some(n) = known {
-        return n;
+/// Preview's `msgs:` value. The exact count comes from the scan or, for
+/// tail-window scans, from the background warm-up — never from a blocking
+/// re-read on the UI thread. `…` while the warm-up may still fill it; `?`
+/// once it has finished without one (unreadable file).
+fn count_label(count: Option<usize>, warming: bool) -> String {
+    match count {
+        Some(n) => n.to_string(),
+        None if warming => "…".into(),
+        None => "?".into(),
     }
-    if let Some(&n) = cache.get(id) {
-        return n;
-    }
-    let n = yield_turns();
-    cache.insert(id.to_string(), n);
-    n
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -423,7 +407,7 @@ fn ui(
     mode: &Mode,
     bookmarked: &HashSet<String>,
     nicknames: &HashMap<String, String>,
-    selected_count: Option<usize>,
+    selected_count: Option<&str>,
 ) {
     let size = f.area();
     let outer = Layout::default()
@@ -585,7 +569,7 @@ fn render_preview(
     sessions: &[&Session],
     state: &ListState,
     nicknames: &HashMap<String, String>,
-    selected_count: Option<usize>,
+    selected_count: Option<&str>,
 ) {
     let block = Block::default().borders(Borders::ALL).title(" Preview ");
     let inner = block.inner(area);
@@ -630,11 +614,7 @@ fn render_preview(
         ]),
         Line::from(vec![
             dim("msgs:   "),
-            Span::raw(
-                selected_count
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| "…".into()),
-            ),
+            Span::raw(selected_count.unwrap_or("…").to_string()),
         ]),
         Line::from(vec![dim("id:     "), Span::raw(s.id.clone())]),
     ]);
@@ -970,16 +950,19 @@ mod tests {
             &cancel,
         );
         let map = cache.read().unwrap();
-        // Lowercased by append_searchable, keyed by session id.
-        assert!(map.get("sess-1").unwrap().contains("warmneedle in history"));
+        // Lowercased by append_searchable, keyed by session id, with the
+        // exact turn count alongside.
+        let warmed = map.get("sess-1").unwrap();
+        assert!(warmed.searchable.contains("warmneedle in history"));
+        assert_eq!(warmed.turns, 1);
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn warm_search_cache_skips_unreadable_and_cancelled() {
         let cache: SearchCache = Arc::new(RwLock::new(HashMap::new()));
-        // Unreadable file → empty result → NOT cached (tail fallback keeps
-        // working for that session).
+        // Unreadable file → NOT cached (tail fallback keeps working for that
+        // session; its count shows as unknown).
         warm_search_cache(
             vec![("gone".into(), "claude", PathBuf::from("/no/such/file"))],
             &cache,
@@ -1045,22 +1028,11 @@ mod tests {
     }
 
     #[test]
-    fn lazy_count_fills_from_all_turns_once() {
-        // exact_count_for is a pure helper over a cache + a closure that yields turns.
-        let mut cache: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let calls = std::cell::Cell::new(0);
-        let yield_turns = || {
-            calls.set(calls.get() + 1);
-            3usize
-        };
-        let a = exact_count_for(&mut cache, "id1", Some(5), yield_turns);
-        assert_eq!(a, 5); // Some(n) short-circuits, closure not called
-        assert_eq!(calls.get(), 0);
-        let b = exact_count_for(&mut cache, "id2", None, yield_turns);
-        assert_eq!(b, 3);
-        let c = exact_count_for(&mut cache, "id2", None, yield_turns);
-        assert_eq!(c, 3);
-        assert_eq!(calls.get(), 1); // cached on second call
+    fn count_label_waits_for_warm_up_then_gives_up() {
+        assert_eq!(count_label(Some(5), true), "5");
+        assert_eq!(count_label(Some(5), false), "5");
+        assert_eq!(count_label(None, true), "…");
+        assert_eq!(count_label(None, false), "?");
     }
 
     #[test]

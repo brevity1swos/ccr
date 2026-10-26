@@ -48,22 +48,32 @@ pub trait Backend: Send + Sync {
     }
 }
 
-/// Full-history searchable text for one session file: every user + assistant
-/// turn, lowercased and capped exactly like the tail-window `Session.searchable`
-/// built during scan. Empty when the file is unreadable — callers should then
-/// fall back to the scan-time text rather than caching the empty result.
+/// What the TUI's background warm-up learns from one full read of a session.
+pub struct FullHistory {
+    /// Every user + assistant turn, lowercased and capped exactly like the
+    /// tail-window `Session.searchable` built during scan.
+    pub searchable: String,
+    /// Exact turn count — fills `Session.message_count` when the tail-window
+    /// scan could not compute it.
+    pub turns: usize,
+}
+
+/// Read one session file in full. `None` when the file is unreadable —
+/// callers then keep the scan-time text and leave the count unknown.
 ///
 /// Reads and parses the whole file even when the cap binds sooner; a streaming
 /// early-exit would need a different `all_turns_at` contract and isn't worth it
 /// for a background warm-up.
-pub fn full_searchable(backend: &dyn Backend, origin: &Path) -> String {
-    let mut buf = String::new();
-    if let Ok(turns) = backend.all_turns_at(origin) {
-        for t in &turns {
-            append_searchable(&mut buf, &t.text);
-        }
+pub fn full_history(backend: &dyn Backend, origin: &Path) -> Option<FullHistory> {
+    let turns = backend.all_turns_at(origin).ok()?;
+    let mut searchable = String::new();
+    for t in &turns {
+        append_searchable(&mut searchable, &t.text);
     }
-    buf
+    Some(FullHistory {
+        searchable,
+        turns: turns.len(),
+    })
 }
 
 pub fn all() -> Vec<Box<dyn Backend>> {

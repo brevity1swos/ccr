@@ -53,8 +53,8 @@ pub struct Session {
     pub title: String,
     pub last_activity: DateTime<Local>,
     /// Exact user+assistant turn count, or `None` when scan used a partial
-    /// tail window and the true total was not computed. Filled lazily by the
-    /// TUI detail pane and by `ccr stats` via `Backend::all_turns`.
+    /// tail window and the true total was not computed. The TUI gets it from
+    /// its background full-history warm-up; `ccr stats` via `Backend::all_turns`.
     pub message_count: Option<usize>,
     pub preview: Vec<Turn>,
     pub possibly_live: bool,
