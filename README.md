@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <strong>Supported:</strong> Claude Code · Codex · Gemini CLI
+  <strong>Supported:</strong> Claude Code · Codex · Gemini CLI · OpenCode
 </p>
 
 <p align="center">
@@ -145,7 +145,7 @@ or any error exits 1.
 
 `ccr` never modifies your session files. If you want to delete one, delete
 it where its tool stored it (`~/.claude/projects/...`, `~/.codex/sessions/...`,
-or `~/.gemini/tmp/...`).
+`~/.gemini/tmp/...`, or `~/.local/share/opencode/`).
 
 ## Environment variables
 
@@ -155,6 +155,7 @@ or `~/.gemini/tmp/...`).
 | `CLAUDE_CONFIG_DIR`   | Claude Code's native override; `ccr` appends `projects`    |
 | `CCR_CODEX_DIR`       | Full path to Codex's `sessions/` dir                       |
 | `CCR_GEMINI_DIR`      | Full path to Gemini's `~/.gemini` root                     |
+| `CCR_OPENCODE_DIR`    | Full path to OpenCode's data dir (holds `opencode.db`)     |
 | `CCR_BOOKMARKS_FILE`  | Override the `~/.ccr/bookmarks.json` location              |
 | `CCR_NICKNAMES_FILE`  | Override the `~/.ccr/nicknames.json` location              |
 
@@ -167,6 +168,15 @@ Each backend knows where its tool stores sessions and how to resume one.
 | Claude Code | `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`         | `claude --resume <uuid>` (cwd set)   |
 | Codex       | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`          | `codex resume <uuid>` (cwd set)      |
 | Gemini CLI  | `~/.gemini/tmp/<project>/chats/session-*.json` + `projects.json` | `gemini --resume <N>` — ccr looks up the 1-based index at runtime via `gemini --list-sessions` |
+| OpenCode    | `~/.local/share/opencode/opencode.db` (SQLite, v2)      | `opencode --session <id>` (cwd set)  |
+
+OpenCode v2 keeps every session in one SQLite database that its background
+service writes continuously (WAL mode). `ccr` never opens the live database:
+each read works on a throwaway snapshot copy (WAL sidecar first, then the db)
+that is deleted right after, so the store stays strictly read-only at rest
+and no lock is ever taken against a running OpenCode. `ccr path <id>` for an
+OpenCode session prints the db path; `ccr show <id>` dumps its raw message
+rows as JSONL instead of catting binary.
 
 For each session `ccr` extracts:
 
