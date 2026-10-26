@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-10-26
+
+### Bug Fixes
+
+- *(scan)* Skip unreadable entries instead of aborting the backend scan
+- *(resume)* Report a missing working directory instead of blaming PATH
+- *(tui)* Require an explicit `y` to resume through the live-session warning
+- *(tui)* Quit on ctrl+c from any mode
+- *(util)* Strip control and bidi characters from displayed session text
+- *(state)* Write bookmarks and nicknames atomically, roll back on failure
+
+### Performance
+
+- *(tui)* Take message counts from the background warm-up
+
+
 ## [0.2.6] - 2026-07-06
 
 ### Bug Fixes
