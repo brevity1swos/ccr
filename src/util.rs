@@ -4,8 +4,12 @@ use std::process::Command;
 
 use crate::session::LIVE_WINDOW_SECS;
 
+/// Single-line, terminal-safe excerpt of `s`: control and bidi characters
+/// (newlines included) become spaces, then it is cut to `max` chars with `…`.
+/// Session text is printed verbatim by `ccr list` and the TUI, and may carry
+/// pasted ANSI escapes.
 pub fn truncate(s: &str, max: usize) -> String {
-    let cleaned = s.replace(['\n', '\r'], " ");
+    let cleaned = sanitize(s);
     if cleaned.chars().count() <= max {
         cleaned
     } else {
@@ -82,7 +86,7 @@ pub fn pgrep_session(id: &str) -> Vec<String> {
     }
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .map(sanitize_line)
+        .map(sanitize)
         .filter(|l| line_resumes_session(l, id, &own_pid))
         .collect()
 }
@@ -92,8 +96,8 @@ pub fn pgrep_session(id: &str) -> Vec<String> {
 /// argv is attacker-controlled on shared hosts, and these lines are re-printed
 /// to the user's terminal (the `ccr resume` refusal message and the TUI
 /// confirm modal), so neither ESC/CSI bytes nor visual-spoofing overrides may
-/// pass through.
-fn sanitize_line(line: &str) -> String {
+/// pass through. Also backs [`truncate`] for session text.
+fn sanitize(line: &str) -> String {
     line.chars()
         .map(|c| {
             let bidi = matches!(
@@ -342,15 +346,18 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_line_replaces_control_bytes() {
+    fn sanitize_replaces_control_bytes() {
         assert_eq!(
-            sanitize_line("42 claude --resume \x1b[2Jabc\x07"),
+            sanitize("42 claude --resume \x1b[2Jabc\x07"),
             "42 claude --resume  [2Jabc "
         );
-        assert_eq!(
-            sanitize_line("42 claude --resume abc"),
-            "42 claude --resume abc"
-        );
+        assert_eq!(sanitize("42 claude --resume abc"), "42 claude --resume abc");
+    }
+
+    #[test]
+    fn truncate_strips_escapes_and_bidi_controls() {
+        assert_eq!(truncate("red \x1b[31mtext\t!", 40), "red  [31mtext !");
+        assert_eq!(truncate("a\u{202E}b", 10), "a b");
     }
 
     /// Platform-shape guard: pgrep must emit `PID cmdline` lines on THIS
