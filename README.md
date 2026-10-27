@@ -89,6 +89,11 @@ Or from source:
 cargo install --path .
 ```
 
+Platforms: Linux and macOS (both tested in CI). The live-session check
+shells out to `pgrep`; without it (e.g. Windows, or slim containers
+lacking procps) the check finds nothing and resume proceeds unguarded.
+Windows is otherwise untested.
+
 ## Use
 
 ```sh
@@ -194,10 +199,13 @@ pub trait Backend: Send + Sync {
     fn name(&self) -> &'static str;
     fn scan(&self) -> Result<Vec<Session>>;
     fn resume(&self, s: &Session) -> std::process::Command;
-    fn all_turns(&self, s: &Session) -> Result<Vec<Turn>>;  // for ccr export
+    // Every user + assistant turn of the session file at `origin`
+    // (ccr export, ccr stats, and the TUI's full-history search warm-up).
+    fn all_turns_at(&self, origin: &Path) -> Result<Vec<Turn>>;
 
-    // Optional override with a useful default:
+    // Optional overrides with useful defaults:
     fn running(&self, s: &Session) -> Vec<String>;   // default: id-as-resume-arg pgrep match
+    fn all_turns(&self, s: &Session) -> Result<Vec<Turn>>;  // default: all_turns_at(&s.origin)
 }
 ```
 
@@ -207,7 +215,6 @@ Register it in `backends::all()` and sessions surface in the shared TUI with a
 ## Links
 
 - [crates.io/crates/ccr](https://crates.io/crates/ccr)
-- [docs.rs/ccr](https://docs.rs/ccr)
 - [Changelog](./CHANGELOG.md)
 
 ## License
