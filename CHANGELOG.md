@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-10-27
+
+### Bug Fixes
+
+- *(tui)* Correct the nickname help text
+
+### Documentation
+
+- *(readme)* Fix backend trait, drop dead docs.rs link, state platforms
+
+
 ## [0.2.8] - 2026-10-27
 
 ### Bug Fixes
