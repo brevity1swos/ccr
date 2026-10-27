@@ -99,7 +99,7 @@ impl Backend for GeminiBackend {
             .par_iter()
             .filter_map(|(p, cwd)| parse_session(p, cwd.clone()).ok().flatten())
             .collect();
-        Ok(out)
+        Ok(dedupe_migrated(out))
     }
 
     fn resume(&self, s: &Session) -> Command {
@@ -151,6 +151,25 @@ impl Backend for GeminiBackend {
         }
         Ok(turns)
     }
+}
+
+/// One entry per `sessionId`. Resuming a legacy `session-*.json` makes Gemini
+/// migrate it to a sibling `session-*.jsonl` without deleting the original,
+/// so both files carry the same id. Keep the most recently active one; on a
+/// tie prefer the `.jsonl`, which is the file Gemini keeps writing.
+fn dedupe_migrated(sessions: Vec<Session>) -> Vec<Session> {
+    let is_jsonl = |s: &Session| s.origin.extension().is_some_and(|e| e == "jsonl");
+    let mut by_id: HashMap<String, Session> = HashMap::new();
+    for s in sessions {
+        match by_id.get(&s.id) {
+            Some(kept)
+                if (kept.last_activity, is_jsonl(kept)) >= (s.last_activity, is_jsonl(&s)) => {}
+            _ => {
+                by_id.insert(s.id.clone(), s);
+            }
+        }
+    }
+    by_id.into_values().collect()
 }
 
 fn parse_session(path: &Path, cwd: PathBuf) -> Result<Option<Session>> {
@@ -243,6 +262,8 @@ fn parse_conversation(content: &str) -> Value {
             continue;
         };
         if let Some(id) = record.get("$rewindTo").and_then(Value::as_str) {
+            // An unknown target clears everything — this mirrors Gemini CLI's
+            // own replay (`messagesMap.clear()` in chatRecordingService.ts).
             let index = messages.iter().position(|m| m["id"] == id).unwrap_or(0);
             messages.truncate(index);
         } else if let Some(patch) = record.get("$patch").and_then(Value::as_object) {
@@ -433,5 +454,37 @@ mod tests {
         assert!(
             parse("{\"id\":\"u1\",\"type\":\"user\",\"content\":\"hello\"}\ninvalid\n").is_none()
         );
+    }
+
+    #[test]
+    fn migrated_legacy_json_is_listed_once() {
+        let at = |id: &str, ts: &str, origin: &str| {
+            let json = format!(
+                r#"{{"sessionId":"{id}","lastUpdated":"{ts}","messages":[{{"type":"user","content":"hi"}}]}}"#
+            );
+            parse_session_from_json(&json, PathBuf::from("/proj"), PathBuf::from(origin))
+                .unwrap()
+                .unwrap()
+        };
+        let out = dedupe_migrated(vec![
+            at("dup", "2026-10-01T00:00:00Z", "/c/session-a.json"),
+            at("dup", "2026-10-01T00:00:00Z", "/c/session-a.jsonl"),
+            at("newer-json", "2026-10-02T00:00:00Z", "/c/session-b.json"),
+            at("newer-json", "2026-10-01T00:00:00Z", "/c/session-b.jsonl"),
+            at("solo", "2026-10-01T00:00:00Z", "/c/session-c.json"),
+        ]);
+        assert_eq!(out.len(), 3);
+        let origin = |id: &str| {
+            out.iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .origin
+                .display()
+                .to_string()
+        };
+        // Tie → the `.jsonl` Gemini keeps writing; otherwise the most recent.
+        assert_eq!(origin("dup"), "/c/session-a.jsonl");
+        assert_eq!(origin("newer-json"), "/c/session-b.json");
+        assert_eq!(origin("solo"), "/c/session-c.json");
     }
 }
