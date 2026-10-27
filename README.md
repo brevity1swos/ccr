@@ -166,7 +166,11 @@ Each backend knows where its tool stores sessions and how to resume one.
 |------|---------|-------------------|
 | Claude Code | `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`         | `claude --resume <uuid>` (cwd set)   |
 | Codex       | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`          | `codex resume <uuid>` (cwd set)      |
-| Gemini CLI  | `~/.gemini/tmp/<project>/chats/session-*.json` + `projects.json` | `gemini --resume <N>` — ccr looks up the 1-based index at runtime via `gemini --list-sessions` |
+| Gemini CLI  | `~/.gemini/tmp/<project>/chats/session-*.json` or `session-*.jsonl` + `projects.json` | `gemini --resume <N>` — ccr looks up the 1-based index at runtime via `gemini --list-sessions` |
+
+Gemini JSONL sessions are replayed before previewing, searching, or exporting,
+including message replacements, content edits, and rewinds. Legacy JSON
+sessions remain supported.
 
 For each session `ccr` extracts:
 
