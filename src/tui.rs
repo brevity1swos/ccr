@@ -795,10 +795,7 @@ fn render_help(f: &mut Frame, area: Rect) {
             "b",
             "toggle bookmark (★ marker, persists in ~/.ccr/bookmarks.json)",
         ),
-        k(
-            "n",
-            "set nickname — shown in yellow instead of last message",
-        ),
+        k("n", "set nickname — yellow label above the last message"),
         k("/", "filter: title, cwd, tool, nickname, or content"),
         k("? / F1", "this help"),
         k("q / Esc / ^C", "quit"),
