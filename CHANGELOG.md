@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-10-27
+
+### Bug Fixes
+
+- *(gemini)* Read and replay JSONL sessions ([#10](https://github.com/brevity1swos/ccr/pull/10))
+- *(gemini)* List a migrated legacy session once
+
+
 ## [0.2.7] - 2026-10-26
 
 ### Bug Fixes
